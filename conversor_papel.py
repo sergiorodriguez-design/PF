@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-conversor_papel.py v11
+conversor_papel.py v12
 
 Convierte una unidad online DOCX/PDF/TXT a DOCX papel editorial usando como base
 un DOCX ya maquetado y, opcionalmente, un DOCX de interacciones.
@@ -12,7 +12,7 @@ Uso:
   python conversor_papel.py UNIDAD.docx EJEMPLO_MAQUETADO.docx INTERACCIONES.docx SALIDA.docx
   python conversor_papel.py UNIDAD.docx EJEMPLO_MAQUETADO.docx PLANTILLA.docx INTERACCIONES.docx SALIDA.docx
 
-Cambios clave v10:
+Cambios clave v12:
   - Inserta gráficos reales del DOCX de referencia: imágenes, SmartArt, diagramas, dibujos.
   - Corrige el problema de namespace wp14: los SmartArt usaban wp14:anchorId y no se declaraba.
   - Copia TODO el paquete del ejemplo salvo document.xml, para que los rId y parts de SmartArt funcionen.
@@ -36,11 +36,11 @@ from xml.sax.saxutils import escape as xml_escape
 # =============================================================================
 
 RE_URL = re.compile(r"^https?://", re.IGNORECASE)
-RE_SEC1 = re.compile(r"^(\d+)\.\s+(.+)")
-RE_SEC2 = re.compile(r"^(\d+)\.(\d+)\s+(.+)")
-RE_SEC3 = re.compile(r"^(\d+)\.(\d+)\.(\d+)\s+(.+)")
+RE_SEC1 = re.compile(r"^(\d+)\.(?!\d)\s+(.+)")
+RE_SEC2 = re.compile(r"^(\d+)\.(\d+)\.?\s+(.+)")
+RE_SEC3 = re.compile(r"^(\d+)\.(\d+)\.(\d+)\.?\s+(.+)")
 RE_INTER = re.compile(r"^Interacci[oó]n\s+(\d+)(?:\.?\s+(.+))?$", re.IGNORECASE)
-RE_OPCION = re.compile(r"^([a-h])\)\s+(.+)")
+RE_OPCION = re.compile(r"^([a-h])[\).]\s+(.+)")
 RE_FORMULA = re.compile(
     r"(?:"
     r"\d+\s*[×x\*/÷]\s*\d+"
@@ -136,6 +136,45 @@ def limpiar_titulo(texto: str) -> str:
     texto = re.sub(r"\s*\.{2,}$", "", texto)
     return texto.rstrip("…. ").strip()
 
+
+
+
+def _normalizar_heading_texto(texto: str) -> str:
+    """Limpia marcas frecuentes de CE y puntos sobrantes en títulos."""
+    return limpiar_titulo(texto or "")
+
+
+def _match_titulo_unidad(texto: str):
+    """Acepta variantes: 'Unidad 1.Título', 'Unidad 1. Título', 'Unidad de aprendizaje 1 - Título'."""
+    texto = _norm_line(texto)
+    pats = (
+        r"^Unidad\s+de\s+aprendizaje\s+(\d+)(?:\s*[.\-–:]\s*(.+))?$",
+        r"^Unidad\s+(\d+)\s*[.\-–:]?\s*(.+)?$",
+        r"^UA\s*(\d+)\s*[.\-–:]?\s*(.+)?$",
+    )
+    for pat in pats:
+        m = re.match(pat, texto, re.I)
+        if m:
+            titulo = (m.group(2) or "").strip()
+            return int(m.group(1)), limpiar_titulo(titulo)
+    return None
+
+
+def _es_cabecera_objetivos(texto: str) -> bool:
+    t = _norm_line(texto).lower().strip(':')
+    return t in {
+        "objetivos", "objetivos específicos", "objetivos especificos",
+        "resultados de aprendizaje", "objetivos de aprendizaje",
+    } or t.startswith("los objetivos específicos") or t.startswith("los objetivos especificos")
+
+
+def _es_cabecera_no_contenido(texto: str) -> bool:
+    t = _norm_line(texto).lower().strip(':')
+    return t in {
+        "resultado de aprendizaje", "resultados de aprendizaje",
+        "criterios de evaluación", "criterios de evaluacion",
+        "ce", "ra",
+    }
 
 def infinitivo_a_imperativo(texto: str) -> str:
     pares = [
@@ -507,7 +546,7 @@ def p_formula(texto: str) -> str:
 
 
 def p_opcion_test(letra: str, texto: str) -> str:
-    texto = re.sub(r"^[a-h]\)\s*", "", texto.strip())
+    texto = re.sub(r"^[a-h][\).]\s*", "", texto.strip())
     return (
         '    <w:p><w:pPr><w:pStyle w:val="EjerciciosPregunta"/></w:pPr>'
         f"<w:r><w:t>{esc(letra)}) {esc(texto)}</w:t></w:r>"
@@ -578,7 +617,7 @@ def parsear_interacciones(path: Path | None) -> dict[int, dict]:
         raw = tbl.rows[1].cells[0].text if len(tbl.rows) > 1 and tbl.rows[1].cells else ""
         raw = raw.replace("\r", "\n").strip()
 
-        if raw.startswith("Opciones:"):
+        if re.search(r"(?im)^\s*Opciones:?\s*$", raw) and re.search(r"(?im)^\s*Soluci[oó]n:", raw):
             result[n] = _parsear_interaccion_opciones(raw)
         elif "Desplegables:" in raw:
             result[n] = _parsear_interaccion_desplegables(raw)
@@ -619,7 +658,7 @@ def parsear_interacciones_texto(path: Path) -> dict[int, dict]:
         n = int(m.group(1))
         raw = "\n".join(lines[1:]).strip()
 
-        if raw.startswith("Opciones:"):
+        if re.search(r"(?im)^\s*Opciones:?\s*$", raw) and re.search(r"(?im)^\s*Soluci[oó]n:", raw):
             result[n] = _parsear_interaccion_opciones(raw)
         elif "Desplegables:" in raw:
             result[n] = _parsear_interaccion_desplegables(raw)
@@ -639,7 +678,7 @@ def _parsear_interaccion_opciones(raw: str) -> dict:
         if not line:
             continue
 
-        if line == "Opciones:":
+        if re.match(r"^Opciones:?$", line, re.I):
             zona = "opciones"
             continue
 
@@ -650,7 +689,7 @@ def _parsear_interaccion_opciones(raw: str) -> dict:
                 solucion.append(rest)
             continue
 
-        if line.startswith("Feedback:"):
+        if re.match(r"^(Feedback|Retroalimentaci[oó]n):", line, re.I):
             zona = "feedback"
             rest = line.split(":", 1)[1].strip() if ":" in line else ""
             if rest:
@@ -658,7 +697,9 @@ def _parsear_interaccion_opciones(raw: str) -> dict:
             continue
 
         if zona == "opciones":
-            line = re.sub(r"^[a-h]\)\s*", "", line)
+            if re.match(r"^Actividad de evaluaci[oó]n$", line, re.I):
+                continue
+            line = re.sub(r"^[a-h][\).]\s*", "", line)
             opciones.append(line)
         elif zona == "solucion":
             solucion.append(line)
@@ -1012,7 +1053,10 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
     current_sub = None
     current_sub2 = None
     sec_count = 0
+    sub_count = 0
+    sub2_count = 0
     en_objetivos = False
+    ignorar_hasta_contenido = False
     blk = None
 
     def activos() -> list:
@@ -1076,10 +1120,12 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
         activos().append(b)
 
     def nueva_sec(titulo: str):
-        nonlocal current_sec, current_sub, current_sub2, sec_count
+        nonlocal current_sec, current_sub, current_sub2, sec_count, sub_count, sub2_count
 
         flush()
         sec_count += 1
+        sub_count = 0
+        sub2_count = 0
         current_sec = {
             "num": str(sec_count),
             "titulo": limpiar_titulo(titulo),
@@ -1091,12 +1137,22 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
         current_sub2 = None
 
     def nueva_sub(num: str, titulo: str):
-        nonlocal current_sub, current_sub2
+        nonlocal current_sub, current_sub2, sub_count, sub2_count
 
         flush()
 
         if not current_sec:
             nueva_sec("Introducción")
+
+        if num:
+            try:
+                sub_count = max(sub_count, int(str(num).split(".")[-1]))
+            except Exception:
+                pass
+        else:
+            sub_count += 1
+            num = f'{current_sec.get("num", "1")}.{sub_count}'
+        sub2_count = 0
 
         current_sub = {
             "num": num,
@@ -1108,12 +1164,21 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
         current_sub2 = None
 
     def nueva_sub2(num: str, titulo: str):
-        nonlocal current_sub2
+        nonlocal current_sub2, sub2_count
 
         flush()
 
         if not current_sub:
             return
+
+        if num:
+            try:
+                sub2_count = max(sub2_count, int(str(num).split(".")[-1]))
+            except Exception:
+                pass
+        else:
+            sub2_count += 1
+            num = f'{current_sub.get("num", "1.1")}.{sub2_count}'
 
         current_sub2 = {
             "num": num,
@@ -1175,9 +1240,17 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
         if es_solo_pua(txt):
             continue
 
-        if txt in {"", "Cambio de pantalla", "Específicos", "Objetivos"} and style not in special_styles:
-            if txt == "Objetivos":
-                en_objetivos = True
+        if txt in {"", "Cambio de pantalla", "Específicos"} and style not in special_styles:
+            continue
+
+        if _es_cabecera_objetivos(txt) and style not in special_styles:
+            en_objetivos = True
+            ignorar_hasta_contenido = False
+            continue
+
+        if _es_cabecera_no_contenido(txt) and not current_sec:
+            en_objetivos = False
+            ignorar_hasta_contenido = True
             continue
 
         if debe_elim(txt):
@@ -1188,7 +1261,9 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
 
             if style.startswith("Heading"):
                 es_fin = True
-            elif RE_INTER.match(txt) and bold:
+            elif style in special_styles:
+                es_fin = True
+            elif RE_INTER.match(txt):
                 es_fin = True
             elif txt in BLOQUES_ESP:
                 es_fin = True
@@ -1199,72 +1274,83 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
                 cerrar_ejercicio_pendiente()
             else:
                 item = rich
+                if txt == "Enunciado":
+                    continue
                 if txt.startswith("Enunciado:"):
                     stripped = txt[len("Enunciado:"):].strip()
                     item = rich_obj(stripped, [{"text": stripped}])
-                if txt and not txt.startswith(("Solución:", "Feedback:")):
+                if txt and not re.match(r"^(Soluci[oó]n|Feedback|Retroalimentaci[oó]n):", txt, re.I):
                     blk["lineas"].append(item)
                 continue
 
+        mtitulo = _match_titulo_unidad(txt)
+        if mtitulo and (style == "Title" or style.startswith("_TITULO UNIDAD") or not est["titulo_unidad"]):
+            n_unidad, titulo_modulo = mtitulo
+            est["titulo_unidad"] = f"Unidad de aprendizaje {n_unidad}"
+            if titulo_modulo and not est["titulo_modulo"]:
+                est["titulo_modulo"] = titulo_modulo
+            continue
+
         if style == "Title" or style.startswith("_TITULO UNIDAD"):
-            m = re.match(r"Unidad de aprendizaje\s+(\d+)(?:[.\-–\s]+(.+))?", txt, re.I)
-
-            if m:
-                est["titulo_unidad"] = f"Unidad de aprendizaje {m.group(1)}"
-                if m.group(2):
-                    est["titulo_modulo"] = m.group(2).strip()
-            elif est["titulo_unidad"] and not est["titulo_modulo"]:
-                est["titulo_modulo"] = txt
+            if est["titulo_unidad"] and not est["titulo_modulo"] and txt:
+                est["titulo_modulo"] = limpiar_titulo(txt)
             continue
 
-        if not est["titulo_unidad"]:
-            m = re.match(r"Unidad de aprendizaje\s+(\d+)", txt, re.I)
-            if m:
-                est["titulo_unidad"] = f"Unidad de aprendizaje {m.group(1)}"
+        if est["titulo_unidad"] and not est["titulo_modulo"] and txt and not _es_cabecera_objetivos(txt):
+            if style in {"Title", "_TITULO UNIDAD 2"} or (not RE_SEC1.match(txt) and not RE_SEC2.match(txt) and len(txt) < 100 and not RE_URL.match(txt)):
+                est["titulo_modulo"] = limpiar_titulo(txt)
                 continue
-
-        if est["titulo_unidad"] and not est["titulo_modulo"] and txt and not txt.startswith("Los objetivos"):
-            if style in {"Title", "_TITULO UNIDAD 2"} or (not RE_SEC1.match(txt) and len(txt) < 100):
-                est["titulo_modulo"] = txt
-                continue
-
-        if txt.startswith("Los objetivos específicos"):
-            en_objetivos = True
-            continue
 
         if en_objetivos:
-            if style.startswith("Heading") or RE_SEC1.match(txt) or txt == "Introducción":
+            if style.startswith("Heading") or RE_SEC1.match(txt) or txt == "Introducción" or _es_cabecera_no_contenido(txt):
                 en_objetivos = False
-            elif txt and not txt.startswith("CE ") and not re.match(r"^[a-e]\) Se han", txt):
+                if _es_cabecera_no_contenido(txt):
+                    ignorar_hasta_contenido = True
+                    continue
+            elif txt and not txt.startswith("CE ") and not re.match(r"^[a-h]\)\s*Se han", txt, re.I):
                 est["objetivos"].append(_limpiar_vineta_rich(rich))
                 continue
 
-        if style == "Heading 1" or style == "1 Título nvl1":
-            if txt == "Objetivos":
-                en_objetivos = True
+        if ignorar_hasta_contenido and not current_sec:
+            if style.startswith("Heading") or txt == "Introducción" or RE_SEC1.match(txt):
+                ignorar_hasta_contenido = False
+            else:
                 continue
 
+        m3h = RE_SEC3.match(txt)
+        m2h = RE_SEC2.match(txt)
+        m1h = RE_SEC1.match(txt)
+
+        if style == "Heading 1" or style == "1 Título nvl1":
             if txt == "Introducción":
                 nueva_sec("Introducción")
                 continue
-
-            m = RE_SEC1.match(txt)
-            if m:
-                nueva_sec(m.group(2))
+            if m3h and current_sub:
+                nueva_sub2(f"{current_sub.get("num", current_sec.get("num", m3h.group(1)) + "." + m3h.group(2))}.{m3h.group(3)}", m3h.group(4))
+                continue
+            if m2h and current_sec:
+                nueva_sub(f"{current_sec.get("num", m2h.group(1))}.{m2h.group(2)}", m2h.group(3))
+                continue
+            if m1h:
+                nueva_sec(m1h.group(2))
             else:
                 nueva_sec(txt)
             continue
 
         if style == "Heading 2" or style == "2 Título nvl2":
-            m = RE_SEC2.match(txt)
-            if m:
-                nueva_sub(f"{m.group(1)}.{m.group(2)}", m.group(3))
+            if m3h and current_sub:
+                nueva_sub2(f"{current_sub.get("num", current_sec.get("num", m3h.group(1)) + "." + m3h.group(2))}.{m3h.group(3)}", m3h.group(4))
+            elif m2h:
+                nueva_sub(f"{current_sec.get("num", m2h.group(1))}.{m2h.group(2)}", m2h.group(3))
+            else:
+                nueva_sub("", txt)
             continue
 
         if style == "Heading 3" or style == "3 Título nvl3":
-            m = RE_SEC3.match(txt)
-            if m:
-                nueva_sub2(f"{m.group(1)}.{m.group(2)}.{m.group(3)}", m.group(4))
+            if m3h:
+                nueva_sub2(f"{current_sub.get("num", current_sec.get("num", m3h.group(1)) + "." + m3h.group(2))}.{m3h.group(3)}", m3h.group(4))
+            else:
+                nueva_sub2("", txt)
             continue
 
         if current_sec is None and txt == "Introducción":
@@ -1274,18 +1360,21 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
         # Dentro de una tarea de evaluación, las líneas numeradas del enunciado
         # (1., 2., 3...) son instrucciones, no títulos de nuevas secciones.
         if blk and blk.get("_estilo") == "Aplicación práctica" and txt:
-            if not txt.startswith(("Duración:", "Objetivo:", "Enunciado:")) and not debe_elim(txt):
-                blk.setdefault("lineas", []).append(rich)
-            continue
+            if RE_INTER.match(txt) or style.startswith("Heading") or style in special_styles:
+                flush()
+            else:
+                if txt != "Enunciado" and not txt.startswith(("Duración:", "Objetivo:", "Enunciado:")) and not debe_elim(txt):
+                    blk.setdefault("lineas", []).append(rich)
+                continue
 
         m3 = RE_SEC3.match(txt)
         if m3 and current_sec:
-            nueva_sub2(f"{m3.group(1)}.{m3.group(2)}.{m3.group(3)}", m3.group(4))
+            nueva_sub2(f"{current_sub.get("num", current_sec.get("num", m3.group(1)) + "." + m3.group(2))}.{m3.group(3)}", m3.group(4))
             continue
 
         m2 = RE_SEC2.match(txt)
         if m2 and current_sec:
-            nueva_sub(f"{m2.group(1)}.{m2.group(2)}", m2.group(3))
+            nueva_sub(f"{current_sec.get("num", m2.group(1))}.{m2.group(2)}", m2.group(3))
             continue
 
         m1 = RE_SEC1.match(txt)
@@ -1297,7 +1386,7 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
             continue
 
         mi = RE_INTER.match(txt)
-        if mi and bold:
+        if mi:
             flush()
 
             n = int(mi.group(1))
