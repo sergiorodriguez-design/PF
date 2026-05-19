@@ -3254,18 +3254,44 @@ def generar_docx(est: dict, ejemplo: Path, plantilla: Path, salida: Path, unidad
         for obj in objetivos:
             pars.append(p_vineta(obj, 1))
 
+    # 1. Procesar y agrupar recursos en todos los niveles, y extraer los hilos conductores a nivel principal
     for sec in est.get("secciones", []):
         sec["bloques"] = remove_empty_example_blocks(sec.get("bloques", []))
+        hilos_hoisted = []
+
+        for sub in sec.get("subsecciones", []):
+            sub["bloques"] = remove_empty_example_blocks(sub.get("bloques", []))
+            nuevos_sub = []
+            for b in sub["bloques"]:
+                if b.get("tipo") == "hilo_conductor":
+                    hilos_hoisted.append(b)
+                else:
+                    nuevos_sub.append(b)
+            sub["bloques"] = nuevos_sub
+
+            for sub2 in sub.get("subsecciones", []):
+                sub2["bloques"] = remove_empty_example_blocks(sub2.get("bloques", []))
+                nuevos_sub2 = []
+                for b in sub2["bloques"]:
+                    if b.get("tipo") == "hilo_conductor":
+                        hilos_hoisted.append(b)
+                    else:
+                        nuevos_sub2.append(b)
+                sub2["bloques"] = nuevos_sub2
+                
+        # Insertar los hilos conductores extraídos al final de los bloques principales de la sección
+        sec["bloques"].extend(hilos_hoisted)
+
+    # 2. Generar el XML de la estructura limpia
+    for sec in est.get("secciones", []):
         pars.append(p(f'{sec.get("num", "")}. {sec.get("titulo", "")}', "1Ttulonvl1"))
         pars.extend(bloques_xml(sec.get("bloques", [])))
 
         for sub in sec.get("subsecciones", []):
-            sub["bloques"] = remove_empty_example_blocks(sub.get("bloques", []))
             pars.append(p(f'{sub.get("num", "")} {sub.get("titulo", "")}', "2Ttulonvl2"))
             pars.extend(bloques_xml(sub.get("bloques", [])))
 
             for sub2 in sub.get("subsecciones", []):
-                sub2["bloques"] = remove_empty_example_blocks(sub2.get("bloques", []))
                 pars.append(p(f'{sub2.get("num", "")} {sub2.get("titulo", "")}', "3Ttulonvl3"))
                 pars.extend(bloques_xml(sub2.get("bloques", [])))
 
