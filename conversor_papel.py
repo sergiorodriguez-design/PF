@@ -3482,8 +3482,19 @@ def tabla_xml(filas: list) -> str:
     n_cols = max((len(row) for row in filas), default=1)
     if n_cols == 0:
         return ""
-    col_w = 4788 // n_cols  # ~8.5cm total in twips, divided equally
+    # Ancho total del cuerpo de página A4 con márgenes estándar (≈15.5 cm)
+    TABLE_W = 8748
+    col_w = TABLE_W // n_cols
     grid = "".join(f'<w:gridCol w:w="{col_w}"/>' for _ in range(n_cols))
+    # Padding de celda: 80 twips (≈ 1.4mm) por lado
+    CELL_MAR = (
+        '<w:tcMar>'
+        '<w:top w:w="80" w:type="dxa"/>'
+        '<w:left w:w="108" w:type="dxa"/>'
+        '<w:bottom w:w="80" w:type="dxa"/>'
+        '<w:right w:w="108" w:type="dxa"/>'
+        '</w:tcMar>'
+    )
     rows_xml = []
     for fila in filas:
         cells_xml = []
@@ -3497,14 +3508,14 @@ def tabla_xml(filas: list) -> str:
             )
             cells_xml.append(
                 f'<w:tc>'
-                f'<w:tcPr><w:tcW w:w="{col_w}" w:type="dxa"/></w:tcPr>'
+                f'<w:tcPr><w:tcW w:w="{col_w}" w:type="dxa"/>{CELL_MAR}</w:tcPr>'
                 f'{paras_xml}</w:tc>'
             )
         rows_xml.append("<w:tr>" + "".join(cells_xml) + "</w:tr>")
     return (
         '<w:tbl>'
         '<w:tblPr><w:tblStyle w:val="TableGrid"/>'
-        '<w:tblW w:w="0" w:type="auto"/>'
+        f'<w:tblW w:w="{TABLE_W}" w:type="dxa"/>'
         '<w:tblBorders>'
         '<w:top w:val="single" w:sz="4" w:space="0" w:color="000000"/>'
         '<w:left w:val="single" w:sz="4" w:space="0" w:color="000000"/>'
