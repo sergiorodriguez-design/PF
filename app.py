@@ -161,8 +161,15 @@ def convertir_lote():
             unidades_individuales = []
             for i, u in enumerate(unidades_lista):
                 numero = u.get("numero", i + 1)
-                nombre_orig = u.get("unidad", {}).get("name", f"unidad_{numero}.docx")
-                nombre_u = safe_name(nombre_orig.rsplit(".", 1)[0] + "_papel.docx")
+                # Usar el nombre personalizado si lo envió el frontend
+                nombre_custom = u.get("nombreSalida", "").strip()
+                if nombre_custom:
+                    nombre_u = safe_name(nombre_custom)
+                    if not nombre_u.lower().endswith(".docx"):
+                        nombre_u += ".docx"
+                else:
+                    nombre_orig = u.get("unidad", {}).get("name", f"unidad_{numero}.docx")
+                    nombre_u = safe_name(nombre_orig.rsplit(".", 1)[0] + "_papel.docx")
                 unidades_individuales.append({
                     "numero": numero,
                     "nombre": nombre_u,
