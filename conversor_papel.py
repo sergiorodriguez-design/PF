@@ -98,7 +98,6 @@ PREFIJOS_ELIM = (
     "Cambio de pantalla",
     "Pulsa en ",
     "Pulsa para ",
-    "Avanza para ",
     "Haz clic ",
     "Haz clic para ",
     "Haz clic en ",
@@ -110,6 +109,7 @@ PREFIJOS_ELIM = (
     "Duracion:",
     "Criterios de evaluación:",
     "Criterios de evaluacion:",
+    "Lanzador:",
 )
 
 RESIDUOS_RESUMEN = {
@@ -167,7 +167,7 @@ RE_GENERIC_UNIT = re.compile(
 )
 
 RE_ACTIVITY_LABEL = re.compile(
-    r"^(Actividad(?:\s+(?:complementaria|colaborativa|de evaluaci[oó]n))?|Aplicaci[oó]n pr[aá]ctica|Caso pr[aá]ctico|Ejercicio|Tarea)(?:\s+\d+)?$",
+    r"^(Actividad(?:\s+(?:complementaria|colaborativa|de evaluaci[oó]n|de aprendizaje))?|Aplicaci[oó]n pr[aá]ctica|Caso pr[aá]ctico|Ejercicio|Tarea)(?:\s+\d+)?$",
     re.I,
 )
 
@@ -252,6 +252,14 @@ def es_solo_pua(texto: str) -> bool:
     return bool(texto) and bool(RE_PUA_ONLY.match(texto))
 
 
+# Verbos/frases genéricas de navegación que van tras "Avanza para "
+_RE_AVANZA_NAV = re.compile(
+    r"^(continuar|ver|pasar|seguir|empezar|comenzar|acceder|avanzar|terminar|"
+    r"el siguiente|la siguiente|los siguientes|las siguientes|ir a|ir al)\b",
+    re.I,
+)
+
+
 def debe_elim(texto: str) -> bool:
     if not texto:
         return True
@@ -260,6 +268,9 @@ def debe_elim(texto: str) -> bool:
         return True
     if texto in RESIDUOS_RESUMEN:
         return True
+    if texto.startswith("Avanza para "):
+        resto = texto[len("Avanza para "):]
+        return bool(_RE_AVANZA_NAV.match(resto))
     return any(texto.startswith(p) for p in PREFIJOS_ELIM)
 
 
@@ -334,12 +345,34 @@ def infinitivo_a_imperativo(texto: str) -> str:
         ("investigar ", "Investiga "), ("seleccionar ", "Selecciona "),
         ("clasificar ", "Clasifica "), ("calcular ", "Calcula "),
         ("consultar ", "Consulta "), ("revisar ", "Revisa "),
+        ("explorar ", "Explora "), ("reflexionar ", "Reflexiona "),
+        ("compartir ", "Comparte "), ("debatir ", "Debate "),
+        ("aplicar ", "Aplica "), ("desarrollar ", "Desarrolla "),
+        ("resolver ", "Resuelve "), ("relacionar ", "Relaciona "),
+        ("evaluar ", "Evalúa "), ("definir ", "Define "),
+        ("justificar ", "Justifica "), ("plantear ", "Plantea "),
+        ("proponer ", "Propón "), ("observar ", "Observa "),
     ]
     low = texto.lower()
     for inf, imp in pares:
         if low.startswith(inf):
             return imp + texto[len(inf):]
     return texto[:1].upper() + texto[1:] if texto else texto
+
+
+def _futuro_a_imperativo(verbo: str) -> str:
+    """Convierte un verbo en futuro 2ª persona (tú) a imperativo.
+    explorarás → Explora, aprenderás → Aprende, escribirás → Escribe"""
+    v = verbo.lower().rstrip(".,;:")
+    if v.endswith("arás"):
+        imp = v[:-4] + "a"
+    elif v.endswith("erás"):
+        imp = v[:-4] + "e"
+    elif v.endswith("irás"):
+        imp = v[:-4] + "e"
+    else:
+        return verbo[0].upper() + verbo[1:] if verbo else verbo
+    return imp[0].upper() + imp[1:]
 
 
 def _es_url_imagen(url: str) -> bool:
@@ -562,9 +595,23 @@ def _strip_literal_from_rich(obj, literal: str) -> dict:
     return rich_obj(rest, [{"text": rest}])
 
 
+def _titulo_con_colon(titulo):
+    """Strip trailing punctuation from a title and append ':'."""
+    if isinstance(titulo, dict):
+        runs = [dict(r) for r in rich_runs(titulo)]
+        if runs:
+            runs[-1]["text"] = runs[-1].get("text", "").rstrip(".: ") + ":"
+        texto = rich_text(titulo).rstrip(".: ") + ":"
+        return rich_obj(texto, runs)
+    return str(titulo).rstrip(".: ") + ":"
+
+
 def _prefix_rich(prefix: str, obj) -> dict:
     runs = [{"text": prefix}] + rich_runs(obj)
-    return rich_obj(prefix + rich_text(obj), runs)
+    result = rich_obj(prefix + rich_text(obj), runs)
+    if isinstance(obj, dict) and obj.get("links"):
+        result["links"] = obj["links"]
+    return result
 
 
 def _limpiar_vineta_rich(obj) -> dict:
@@ -572,7 +619,16 @@ def _limpiar_vineta_rich(obj) -> dict:
     limpio = _limpiar_vineta_literal(texto)
     if limpio == texto:
         return rich_obj(texto, rich_runs(obj))
-    return rich_obj(limpio, [{"text": limpio}])
+    # Strip bullet prefix from the first run's text, preserving bold/italic of remaining runs.
+    runs = [dict(r) for r in rich_runs(obj)]
+    for i, r in enumerate(runs):
+        t = r.get("text", "")
+        t_clean = _limpiar_vineta_literal(t)
+        if t_clean != t:
+            runs[i]["text"] = t_clean
+            break
+    runs = [r for r in runs if r.get("text", "")]
+    return rich_obj(limpio, runs or [{"text": limpio}])
 
 
 def _patch_document_rels_hyperlinks(rels_xml: bytes | str) -> bytes:
@@ -620,11 +676,8 @@ def p_vineta(texto: str, nivel: int = 1) -> str:
     simbolo = esc(VINETA_SIM.get(nivel, VINETA_SIM[1]))
 
     if isinstance(texto, dict):
-        clean = _limpiar_vineta_literal(rich_text(texto))
-        runs = rich_runs(texto)
-        # Si había una viñeta literal al principio, la quitamos del texto enriquecido.
-        if clean != rich_text(texto):
-            runs = [{"text": clean}]
+        cleaned = _limpiar_vineta_rich(texto)
+        runs = rich_runs(cleaned)
         return (
             f'    <w:p><w:pPr><w:pStyle w:val="{estilo}"/></w:pPr>'
             f"<w:r><w:t>{simbolo}</w:t></w:r>"
@@ -642,10 +695,8 @@ def p_vineta(texto: str, nivel: int = 1) -> str:
 
 def p_vineta_ejemplo(texto: str) -> str:
     if isinstance(texto, dict):
-        clean = _limpiar_vineta_literal(rich_text(texto))
-        runs = rich_runs(texto)
-        if clean != rich_text(texto):
-            runs = [{"text": clean}]
+        cleaned = _limpiar_vineta_rich(texto)
+        runs = rich_runs(cleaned)
         return (
             f'    <w:p><w:pPr><w:pStyle w:val="Ejemplos-Vietanvl1"/></w:pPr>'
             f"<w:r><w:t>●</w:t></w:r>"
@@ -663,10 +714,8 @@ def p_vineta_ejemplo(texto: str) -> str:
 
 def p_vineta_recuerda(texto) -> str:
     if isinstance(texto, dict):
-        clean = _limpiar_vineta_literal(rich_text(texto))
-        runs = rich_runs(texto)
-        if clean != rich_text(texto):
-            runs = [{"text": clean}]
+        cleaned = _limpiar_vineta_rich(texto)
+        runs = rich_runs(cleaned)
         return (
             f'    <w:p><w:pPr><w:pStyle w:val="Recuerda-Vietanvl1"/></w:pPr>'
             f"<w:r><w:t>●</w:t></w:r>"
@@ -680,11 +729,24 @@ def p_vineta_recuerda(texto) -> str:
     )
 
 
-def p_vineta_bold(texto: str, nivel: int = 1) -> str:
+def p_vineta_bold(texto, nivel: int = 1) -> str:
     estilo = VINETA_EST.get(nivel, VINETA_EST[1])
     simbolo = esc(VINETA_SIM.get(nivel, VINETA_SIM[1]))
-    te = esc(_limpiar_vineta_literal(texto))
 
+    if isinstance(texto, dict):
+        cleaned = _limpiar_vineta_rich(texto)
+        runs = []
+        for r in rich_runs(cleaned):
+            nr = dict(r)
+            nr["bold"] = True
+            runs.append(nr)
+        return (
+            f'    <w:p><w:pPr><w:pStyle w:val="{estilo}"/></w:pPr>'
+            f"<w:r><w:t>{simbolo}</w:t></w:r>"
+            f"<w:r><w:tab/></w:r>{_runs_to_xml(runs)}</w:p>"
+        )
+
+    te = esc(_limpiar_vineta_literal(texto))
     return (
         f'    <w:p><w:pPr><w:pStyle w:val="{estilo}"/></w:pPr>'
         f"<w:r><w:t>{simbolo}</w:t></w:r>"
@@ -693,29 +755,75 @@ def p_vineta_bold(texto: str, nivel: int = 1) -> str:
     )
 
 
-def p_desp(titulo: str, desc: str, nivel: int = 1) -> str:
+def p_desp(titulo, desc, nivel: int = 1) -> str:
     estilo = VINETA_EST.get(nivel, VINETA_EST[1])
     simbolo = esc(VINETA_SIM.get(nivel, VINETA_SIM[1]))
-    titulo = titulo.rstrip(".: ")
-    desc = desc.strip()
-    desc = re.sub(r"::+", ":", desc)
-
-    return (
+    titulo_plain = ""
+    if isinstance(titulo, dict):
+        titulo_plain = rich_text(titulo).rstrip(".: ")
+        t_runs = list(rich_runs(titulo))
+        if t_runs:
+            last = dict(t_runs[-1])
+            last["text"] = last.get("text", "").rstrip(".: ")
+            t_runs = list(t_runs[:-1]) + [last]
+        titulo_block = _runs_to_xml(t_runs) + f'<w:r><w:rPr><w:b/><w:bCs/></w:rPr><w:t xml:space="preserve">: </w:t></w:r>'
+    else:
+        titulo_str = str(titulo).rstrip(".: ")
+        titulo_plain = titulo_str
+        titulo_block = f'<w:r><w:rPr><w:b/><w:bCs/></w:rPr><w:t xml:space="preserve">{esc(titulo_str)}: </w:t></w:r>'
+    header = (
         f'    <w:p><w:pPr><w:pStyle w:val="{estilo}"/></w:pPr>'
         f"<w:r><w:t>{simbolo}</w:t></w:r>"
         f"<w:r><w:tab/></w:r>"
-        f"<w:r><w:rPr><w:b/><w:bCs/></w:rPr>"
-        f'<w:t xml:space="preserve">{esc(titulo)}. </w:t></w:r>'
-        f"<w:r><w:t>{esc(desc)}</w:t></w:r></w:p>"
+        f"{titulo_block}"
     )
+    if isinstance(desc, dict):
+        desc_text = rich_text(desc).strip()
+        runs = [dict(r) for r in rich_runs(desc)]
+        if titulo_plain and desc_text.lower().startswith(titulo_plain.lower()):
+            m = re.match(re.escape(titulo_plain) + r"[\.\s:]*", desc_text, re.I)
+            if m:
+                to_remove = m.end()
+                removed = 0
+                for i, r in enumerate(runs):
+                    if removed >= to_remove:
+                        break
+                    t = r.get("text", "")
+                    if len(t) <= (to_remove - removed):
+                        removed += len(t)
+                        r["text"] = ""
+                    else:
+                        r["text"] = t[(to_remove - removed):]
+                        removed = to_remove
+        for r in runs:
+            if r.get("text"):
+                r["text"] = r["text"][:1].lower() + r["text"][1:]
+                break
+        return header + _runs_to_xml(runs) + "</w:p>"
+    desc_str = re.sub(r"::+", ":", str(desc).strip())
+    if titulo_plain and desc_str.lower().startswith(titulo_plain.lower()):
+        m = re.match(re.escape(titulo_plain) + r"[\.\s:]*", desc_str, re.I)
+        if m:
+            desc_str = desc_str[m.end():]
+    if desc_str:
+        desc_str = desc_str[:1].lower() + desc_str[1:]
+    return header + f"<w:r><w:t>{esc(desc_str)}</w:t></w:r></w:p>"
 
 
 def p_formula(texto: str) -> str:
     return p(texto, "Formula")
 
 
-def p_opcion_test(letra: str, texto: str) -> str:
-    texto = re.sub(r"^[a-h][\).]\s*", "", texto.strip())
+def p_opcion_test(letra: str, texto) -> str:
+    if isinstance(texto, dict):
+        cleaned = _limpiar_vineta_rich(texto)
+        runs = rich_runs(cleaned)
+        return (
+            '    <w:p><w:pPr><w:pStyle w:val="EjerciciosPregunta"/></w:pPr>'
+            f'<w:r><w:t xml:space="preserve">{esc(letra)}) </w:t></w:r>'
+            f"{_runs_to_xml(runs)}</w:p>"
+        )
+    texto = re.sub(r"^[a-h][\).]\s*", "", str(texto).strip())
     return (
         '    <w:p><w:pPr><w:pStyle w:val="EjerciciosPregunta"/></w:pPr>'
         f"<w:r><w:t>{esc(letra)}) {esc(texto)}</w:t></w:r>"
@@ -766,24 +874,52 @@ def _replace_text_preserve_first_style(obj, nuevo: str) -> dict:
 
 
 def _normalizar_enunciado_complementaria(obj) -> dict:
-    """Convierte redacciones online a enunciado papel: 'En esta actividad deberás pensar...' -> 'Piensa...'."""
+    """Convierte redacciones online a enunciado papel.
+    'En esta actividad deberás pensar...' → 'Piensa...'
+    'En esta actividad explorarás la guía...' → 'Explora la guía...'
+    """
     texto = rich_text(obj).strip()
     if not texto:
         return obj
 
-    reglas = [
+    nuevo = texto
+
+    # 1. Patrones con "deberás" + infinitivo
+    reglas_debers = [
         (r"^En esta actividad deberás pensar en\s+", "Piensa en "),
         (r"^En esta actividad deberás\s+", ""),
         (r"^Deberás realizar\s+", "Realiza "),
         (r"^Deberás\s+", ""),
-        (r"^Podrás compartir.*$", ""),
-        (r"^Podrás debatir.*$", ""),
     ]
-    nuevo = texto
-    for pat, rep in reglas:
+    for pat, rep in reglas_debers:
         nuevo2 = re.sub(pat, rep, nuevo, flags=re.I)
         if nuevo2 != nuevo:
             nuevo = infinitivo_a_imperativo(nuevo2.strip())
+            break
+
+    # 2. "En esta actividad VERB_FUTURO(rás) ..." → imperativo
+    if nuevo == texto:
+        m_fut = re.match(r"^En esta actividad[,]?\s+(\w+rás)[,]?\s*(.*)", nuevo, re.I | re.S)
+        if m_fut:
+            verbo = m_fut.group(1)
+            resto = m_fut.group(2).strip()
+            imp = _futuro_a_imperativo(verbo)
+            nuevo = (imp + " " + resto).strip() if resto else imp
+
+    # 3. "En esta actividad VERB_INFINITIVO ..." → imperativo
+    if nuevo == texto:
+        m_inf = re.match(r"^En esta actividad[,]?\s+(\w+[aei]r)\s+(.*)", nuevo, re.I | re.S)
+        if m_inf:
+            verbo = m_inf.group(1)
+            resto = m_inf.group(2).strip()
+            imp_txt = infinitivo_a_imperativo(verbo + " " + resto)
+            if imp_txt != verbo + " " + resto:
+                nuevo = imp_txt
+
+    # 4. Frases de colaboración a eliminar
+    for pat in (r"^Podrás compartir.*$", r"^Podrás debatir.*$", r"^Podrás aportar.*$"):
+        if re.match(pat, nuevo, re.I):
+            nuevo = ""
             break
 
     nuevo = re.sub(r"\s+", " ", nuevo).strip()
@@ -794,15 +930,27 @@ def _normalizar_enunciado_complementaria(obj) -> dict:
     return _replace_text_preserve_first_style(obj, nuevo)
 
 
-def _solucion_feedback_a_lineas(sol: str, fb: str) -> list[dict]:
+def _solucion_feedback_a_lineas(sol, fb) -> list[dict]:
     lineas = []
-    sol = (sol or "").strip()
-    fb = (fb or "").strip()
-    if sol:
-        lineas.append(rich_obj(f"Solución: {sol}", [{"text": "Solución: ", "bold": True}, {"text": sol}]))
-    if fb:
-        # El feedback queda como argumento/justificación de la solución.
-        lineas.append(rich_obj(f"Argumento de la solución: {fb}", [{"text": "Argumento de la solución: ", "bold": True}, {"text": fb}]))
+    if isinstance(sol, dict):
+        sol_txt = rich_text(sol).strip()
+        if sol_txt:
+            lineas.append(rich_obj(
+                f"Solución: {sol_txt}",
+                [{"text": "Solución: ", "bold": True}] + list(rich_runs(sol))
+            ))
+    else:
+        sol_str = (sol or "").strip()
+        if sol_str:
+            lineas.append(rich_obj(f"Solución: {sol_str}", [{"text": "Solución: ", "bold": True}, {"text": sol_str}]))
+    if isinstance(fb, dict):
+        fb_txt = rich_text(fb).strip()
+        if fb_txt:
+            lineas.append(fb)
+    else:
+        fb_str = (fb or "").strip()
+        if fb_str:
+            lineas.append(rich_obj(fb_str, [{"text": fb_str}]))
     return lineas
 
 
@@ -811,7 +959,7 @@ IMAGE_LABEL_RED = "C00000"
 def add_image_label_paragraph(texto: str, style: str) -> str:
     texto = texto.strip()
     if re.match(r"^Pie de imagen:\s*", texto, re.I):
-        resto = re.sub(r"^Pie de imagen:\s*", "", texto, flags=re.I)
+        resto = re.sub(r"^(Pie de imagen:\s*)+", "", texto, flags=re.I)
         return (
             f'    <w:p><w:pPr><w:pStyle w:val="{style}"/></w:pPr>'
             f'<w:r><w:rPr><w:color w:val="{IMAGE_LABEL_RED}"/></w:rPr>'
@@ -820,9 +968,9 @@ def add_image_label_paragraph(texto: str, style: str) -> str:
             f'</w:p>'
         )
     elif re.match(r"^Descripci[oó]n de (la )?imagen:\s*", texto, re.I):
-        m = re.match(r"^(Descripci[oó]n de (la )?imagen:)\s*(.*)", texto, re.I)
+        m = re.match(r"^(Descripci[oó]n de (la )?imagen:)\s*", texto, re.I)
         label = m.group(1)
-        resto = m.group(3)
+        resto = re.sub(r"^(Descripci[oó]n de (la )?imagen:\s*)+", "", texto, flags=re.I)
         return (
             f'    <w:p><w:pPr><w:pStyle w:val="{style}"/></w:pPr>'
             f'<w:r><w:rPr><w:color w:val="{IMAGE_LABEL_RED}"/></w:rPr>'
@@ -1042,9 +1190,202 @@ def parsear_interacciones(path: Path | None) -> dict[int, dict]:
         return parsear_interacciones_texto(path)
 
     from docx import Document
+    from docx.oxml.ns import qn as _qn
+
+    def _cell_lineas(cell) -> list[str]:
+        """
+        Extrae las líneas de una celda párrafo a párrafo.
+        Cuando un párrafo tiene numeración automática (w:numPr) asigna el
+        prefijo de letra correspondiente (a., b., …) para no perder ese dato
+        al leer solo cell.text.
+        """
+        letras_seq = "abcdefghijklmnopqrstuvwxyz"
+        letra_idx: dict[str, int] = {}  # numId_ilvl → contador
+        lines: list[str] = []
+        for para in cell.paragraphs:
+            txt = _norm_line(para.text)
+            if not txt:
+                continue
+            # Detectar numeración automática
+            try:
+                pPr = para._p.find(_qn("w:pPr"))
+                numPr = pPr.find(_qn("w:numPr")) if pPr is not None else None
+                if numPr is not None:
+                    numId_el = numPr.find(_qn("w:numId"))
+                    ilvl_el = numPr.find(_qn("w:ilvl"))
+                    numId_val = int(numId_el.get(_qn("w:val"), "0")) if numId_el is not None else 0
+                    ilvl_val = int(ilvl_el.get(_qn("w:val"), "0")) if ilvl_el is not None else 0
+                    if numId_val > 0:
+                        _num_fmt = _inter_num_fmt.get((str(numId_val), str(ilvl_val)), "")
+                        key = f"{numId_val}_{ilvl_val}"
+                        if _num_fmt == "bullet":
+                            _vsim = {0: "●", 1: "○", 2: "▪", 3: "–"}
+                            prefix = _vsim.get(ilvl_val, "●") + " "
+                            clean_txt = re.sub(r"^[a-zA-Z0-9]+[.)]\s+", "", txt)
+                            txt = prefix + clean_txt
+                        else:
+                            idx = letra_idx.get(key, 0)
+                            if idx < len(letras_seq):
+                                txt = letras_seq[idx] + ". " + txt
+                            letra_idx[key] = idx + 1
+            except Exception:
+                pass
+            lines.append(txt)
+        return lines
+
+    def _cell_lineas_rich(cell) -> list[dict]:
+        """Like _cell_lineas but returns rich_obj per paragraph, preserving bold/italic runs."""
+        letras_seq = "abcdefghijklmnopqrstuvwxyz"
+        letra_idx: dict[str, int] = {}
+        rich_lines = []
+        for para in cell.paragraphs:
+            txt = _norm_line(para.text)
+            if not txt:
+                continue
+            runs = []
+            for r_el in para._p.findall('.//' + _qn('w:r')):
+                texts = [t.text or '' for t in r_el.findall('.//' + _qn('w:t'))]
+                text = ''.join(texts)
+                if not text:
+                    continue
+                rpr = r_el.find(_qn('w:rPr'))
+                bold_r = rpr is not None and rpr.find(_qn('w:b')) is not None
+                italic_r = rpr is not None and rpr.find(_qn('w:i')) is not None
+                r: dict = {"text": text}
+                if bold_r:
+                    r["bold"] = True
+                if italic_r:
+                    r["italic"] = True
+                runs.append(r)
+            if not runs:
+                runs = [{"text": txt}]
+            try:
+                pPr = para._p.find(_qn("w:pPr"))
+                numPr = pPr.find(_qn("w:numPr")) if pPr is not None else None
+                if numPr is not None:
+                    numId_el = numPr.find(_qn("w:numId"))
+                    ilvl_el = numPr.find(_qn("w:ilvl"))
+                    numId_val = int(numId_el.get(_qn("w:val"), "0")) if numId_el is not None else 0
+                    ilvl_val = int(ilvl_el.get(_qn("w:val"), "0")) if ilvl_el is not None else 0
+                    if numId_val > 0:
+                        _num_fmt = _inter_num_fmt.get((str(numId_val), str(ilvl_val)), "")
+                        key = f"{numId_val}_{ilvl_val}"
+                        if _num_fmt == "bullet":
+                            _vsim = {0: "●", 1: "○", 2: "▪", 3: "–"}
+                            prefix = _vsim.get(ilvl_val, "●") + " "
+                            # Strip any manually-typed letter/number prefix (e.g. "a. ", "1. ")
+                            mod_runs = [dict(r) for r in runs]
+                            if mod_runs:
+                                first_clean = re.sub(r"^[a-zA-Z0-9]+[.)]\s+", "", mod_runs[0].get("text", ""))
+                                if first_clean != mod_runs[0].get("text", ""):
+                                    mod_runs[0]["text"] = first_clean
+                                    if not mod_runs[0]["text"]:
+                                        mod_runs = mod_runs[1:]
+                            clean_txt = re.sub(r"^[a-zA-Z0-9]+[.)]\s+", "", txt)
+                            runs = [{"text": prefix}] + mod_runs
+                            txt = prefix + clean_txt
+                        else:
+                            idx = letra_idx.get(key, 0)
+                            if idx < len(letras_seq):
+                                prefix = letras_seq[idx] + ". "
+                                runs = [{"text": prefix}] + runs
+                                txt = prefix + txt
+                            letra_idx[key] = idx + 1
+            except Exception:
+                pass
+            rich_lines.append(rich_obj(txt, runs))
+        return rich_lines
+
+    def _opciones_rich_data(rich_lines: list[dict]) -> dict:
+        """Zone rich_lines into opciones_rich, solucion_rich, feedback_rich."""
+        opciones_rich: list[dict] = []
+        solucion_rich = None
+        feedback_rich = None
+        zona = "opciones"
+        visto_letra = False
+
+        for ro in rich_lines:
+            txt = rich_text(ro).strip()
+            if not txt:
+                continue
+            if re.match(r"^Opciones:?$", txt, re.I):
+                zona = "opciones"
+                continue
+            if re.match(r"^Soluci[oó]n:", txt, re.I):
+                zona = "solucion"
+                rest_ro = _strip_prefix_runs(ro, r"^Soluci[oó]n:\s*")
+                if rich_text(rest_ro).strip():
+                    solucion_rich = rest_ro
+                continue
+            if re.match(r"^(Feedback|Retroalimentaci[oó]n):", txt, re.I):
+                zona = "feedback"
+                rest_ro = _strip_prefix_runs(ro, r"^(Feedback|Retroalimentaci[oó]n):\s*")
+                if rich_text(rest_ro).strip():
+                    feedback_rich = rest_ro
+                continue
+            if zona == "opciones":
+                if re.match(r"^Actividad de evaluaci[oó]n$", txt, re.I):
+                    continue
+                if re.match(r"^[a-h][\).]\s*", txt):
+                    visto_letra = True
+                    opciones_rich.append(_strip_prefix_runs(ro, r"^[a-h][\).]\s*"))
+                elif not visto_letra:
+                    pass  # enunciado already in plain parse
+                else:
+                    if opciones_rich:
+                        last = opciones_rich[-1]
+                        combined_txt = rich_text(last) + " " + txt
+                        combined_runs = rich_runs(last) + [{"text": " "}] + rich_runs(ro)
+                        opciones_rich[-1] = rich_obj(combined_txt, combined_runs)
+            elif zona == "solucion":
+                if solucion_rich is None:
+                    solucion_rich = ro
+                else:
+                    combined_txt = rich_text(solucion_rich) + " " + txt
+                    combined_runs = rich_runs(solucion_rich) + [{"text": " "}] + rich_runs(ro)
+                    solucion_rich = rich_obj(combined_txt, combined_runs)
+            elif zona == "feedback":
+                if feedback_rich is None:
+                    feedback_rich = ro
+                else:
+                    combined_txt = rich_text(feedback_rich) + " " + txt
+                    combined_runs = rich_runs(feedback_rich) + [{"text": " "}] + rich_runs(ro)
+                    feedback_rich = rich_obj(combined_txt, combined_runs)
+
+        return {
+            "opciones_rich": opciones_rich,
+            "solucion_rich": solucion_rich,
+            "feedback_rich": feedback_rich,
+        }
 
     doc = Document(str(path))
     result: dict[int, dict] = {}
+
+    _inter_num_fmt: dict[tuple, str] = {}
+    try:
+        nbp = doc.part.numbering_part
+        if nbp is not None:
+            nxml = nbp._element
+            _abs_defs: dict = {}
+            for _abn in nxml.findall(_qn("w:abstractNum")):
+                _abs_id = _abn.get(_qn("w:abstractNumId"))
+                _levels: dict = {}
+                for _lvl in _abn.findall(_qn("w:lvl")):
+                    _ilvl = _lvl.get(_qn("w:ilvl"))
+                    _fmt_el = _lvl.find(_qn("w:numFmt"))
+                    if _fmt_el is not None:
+                        _levels[_ilvl] = _fmt_el.get(_qn("w:val"), "")
+                _abs_defs[_abs_id] = _levels
+            for _num in nxml.findall(_qn("w:num")):
+                _num_id = _num.get(_qn("w:numId"))
+                _abs_ref = _num.find(_qn("w:abstractNumId"))
+                if _abs_ref is not None:
+                    _abs_id = _abs_ref.get(_qn("w:val"))
+                    if _abs_id in _abs_defs:
+                        for _ilvl, _fmt in _abs_defs[_abs_id].items():
+                            _inter_num_fmt[(_num_id, _ilvl)] = _fmt
+    except Exception:
+        pass
 
     for tbl in doc.tables:
         if not tbl.rows:
@@ -1056,13 +1397,29 @@ def parsear_interacciones(path: Path | None) -> dict[int, dict]:
             continue
 
         n = int(m.group(1))
-        raw = tbl.rows[1].cells[0].text if len(tbl.rows) > 1 and tbl.rows[1].cells else ""
+        if len(tbl.rows) > 1 and tbl.rows[1].cells:
+            cell = tbl.rows[1].cells[0]
+            lines_raw = _cell_lineas(cell)
+            raw = "\n".join(lines_raw)
+        else:
+            raw = ""
+            cell = None
         raw = raw.replace("\r", "\n").strip()
 
-        if re.search(r"(?im)^\s*Opciones:?\s*$", raw) and re.search(r"(?im)^\s*Soluci[oó]n:", raw):
+        _tiene_opciones = bool(
+            re.search(r"(?im)^\s*Opciones:?\s*$", raw)
+            or re.search(r"(?m)^[a-d][.)]\s+\S", raw)
+        )
+        if _tiene_opciones and re.search(r"(?im)^\s*Soluci[oó]n:", raw):
             result[n] = _parsear_interaccion_opciones(raw)
+            if cell is not None:
+                rich_lines = _cell_lineas_rich(cell)
+                result[n].update(_opciones_rich_data(rich_lines))
         elif re.search(r"(?im)^\s*Desplegables:?\s*$", raw):
             result[n] = _parsear_interaccion_desplegables(raw)
+            if cell is not None:
+                rich_lines = _cell_lineas_rich(cell)
+                result[n]["items_rich"] = _parsear_interaccion_desplegables_rich(rich_lines)
         else:
             result[n] = {
                 "tipo": "texto",
@@ -1100,7 +1457,11 @@ def parsear_interacciones_texto(path: Path) -> dict[int, dict]:
         n = int(m.group(1))
         raw = "\n".join(lines[1:]).strip()
 
-        if re.search(r"(?im)^\s*Opciones:?\s*$", raw) and re.search(r"(?im)^\s*Soluci[oó]n:", raw):
+        _tiene_opciones = bool(
+            re.search(r"(?im)^\s*Opciones:?\s*$", raw)
+            or re.search(r"(?m)^[a-d][.)]\s+\S", raw)
+        )
+        if _tiene_opciones and re.search(r"(?im)^\s*Soluci[oó]n:", raw):
             result[n] = _parsear_interaccion_opciones(raw)
         elif re.search(r"(?im)^\s*Desplegables:?\s*$", raw):
             result[n] = _parsear_interaccion_desplegables(raw)
@@ -1110,9 +1471,11 @@ def parsear_interacciones_texto(path: Path) -> dict[int, dict]:
 
 def _parsear_interaccion_opciones(raw: str) -> dict:
     opciones: list[str] = []
+    enunciado_lines: list[str] = []
     solucion: list[str] = []
     feedback: list[str] = []
     zona = "opciones"
+    visto_letra = False  # True cuando ya se vio la primera opción con letra (a), b)…)
 
     for line in raw.splitlines():
         line = line.strip()
@@ -1124,7 +1487,7 @@ def _parsear_interaccion_opciones(raw: str) -> dict:
             zona = "opciones"
             continue
 
-        if re.match(r"^Soluci[oó]n:", line):
+        if re.match(r"^Soluci[oó]n:", line, re.I):
             zona = "solucion"
             rest = line.split(":", 1)[1].strip() if ":" in line else ""
             if rest:
@@ -1141,8 +1504,17 @@ def _parsear_interaccion_opciones(raw: str) -> dict:
         if zona == "opciones":
             if re.match(r"^Actividad de evaluaci[oó]n$", line, re.I):
                 continue
-            line = re.sub(r"^[a-h][\).]\s*", "", line)
-            opciones.append(line)
+            if re.match(r"^[a-h][\).]\s*", line):
+                visto_letra = True
+                clean = re.sub(r"^[a-h][\).]\s*", "", line)
+                opciones.append(clean)
+            elif not visto_letra:
+                # Texto antes de la primera opción con letra → es el enunciado
+                enunciado_lines.append(line)
+            else:
+                # Continuación de la última opción
+                if opciones:
+                    opciones[-1] += " " + line
         elif zona == "solucion":
             solucion.append(line)
         elif zona == "feedback":
@@ -1150,6 +1522,7 @@ def _parsear_interaccion_opciones(raw: str) -> dict:
 
     return {
         "tipo": "opciones",
+        "enunciado": " ".join(enunciado_lines).strip(),
         "opciones": opciones,
         "solucion": " ".join(solucion).strip(),
         "feedback": " ".join(feedback).strip(),
@@ -1214,6 +1587,8 @@ def _parece_titulo_desplegable(line: str) -> bool:
         return False
     if line[0].islower():
         return False
+    if re.match(r"^[·●○▪–\-]\s", line):
+        return False
     if re.match(
         r"^(Por ejemplo|Asimismo|Además|También|Puede|Se calcula|Número|Cuando|Una|Un consumidor|El cliente|La empresa)",
         line
@@ -1261,12 +1636,27 @@ def _separar_cuerpo_y_subitems(lines: list[str]) -> tuple[str, list[str]]:
     if len(colon_lines) > 1 and all(":" in x and len(x.split(":", 1)[0]) <= 70 for x in colon_lines):
         return "", colon_lines
 
-    if "" not in clean:
+    bullet_idx = -1
+    for k, line in enumerate(clean):
+        if re.match(r"^[·●○▪\-–]\s*|^o\s+", line, re.I):
+            bullet_idx = k
+            break
+
+    blank_idx = clean.index("") if "" in clean else -1
+
+    split_idx = -1
+    if blank_idx != -1 and bullet_idx != -1:
+        split_idx = min(blank_idx, bullet_idx)
+    elif blank_idx != -1:
+        split_idx = blank_idx
+    elif bullet_idx != -1:
+        split_idx = bullet_idx
+
+    if split_idx == -1:
         return _join_sin_doble_puntuacion(clean), []
 
-    first_blank = clean.index("")
-    body_lines = [x for x in clean[:first_blank] if x.strip()]
-    rest = [x for x in clean[first_blank + 1:] if x.strip()]
+    body_lines = [x for x in clean[:split_idx] if x.strip()]
+    rest = [x for x in clean[split_idx:] if x.strip()]
 
     return _join_sin_doble_puntuacion(body_lines), rest
 
@@ -1278,66 +1668,309 @@ def _join_sin_doble_puntuacion(lines: list[str]) -> str:
     return text.strip()
 
 
-def expandir_interaccion(n: int, interacciones: dict[int, dict]) -> list[dict]:
+def _strip_prefix_runs(ro: dict, prefix_re: str) -> dict:
+    """Strip a regex prefix from the text/runs of a rich_obj."""
+    txt = rich_text(ro)
+    m = re.match(prefix_re, txt, re.I)
+    if not m:
+        return ro
+    skip = m.end()
+    runs = [dict(r) for r in rich_runs(ro)]
+    consumed = 0
+    new_runs = []
+    for r in runs:
+        rt = str(r.get("text", ""))
+        if consumed < skip:
+            remaining = skip - consumed
+            if len(rt) <= remaining:
+                consumed += len(rt)
+                continue
+            r["text"] = rt[remaining:]
+            consumed = skip
+        new_runs.append(r)
+    new_txt = txt[skip:]
+    return rich_obj(new_txt, new_runs or [{"text": new_txt}])
+
+
+def _join_rich_objs(pairs: list[tuple]) -> dict:
+    """Join (rich_obj, text) pairs into a single rich_obj with space between paragraphs."""
+    if not pairs:
+        return rich_obj("", [])
+    all_runs: list[dict] = []
+    combined_text = ""
+    for k, (ro, t) in enumerate(pairs):
+        if k > 0 and t:
+            all_runs.append({"text": " "})
+            combined_text += " "
+        all_runs.extend(rich_runs(ro))
+        combined_text += t
+    return rich_obj(combined_text, all_runs or [{"text": combined_text}])
+
+
+def _separar_cuerpo_y_subitems_rich(rich_items: list[dict]) -> tuple:
+    """Rich version of _separar_cuerpo_y_subitems. Returns (body_rich|None, subitems_rich)."""
+    texts = [rich_text(ro).strip() for ro in rich_items]
+    while rich_items and not texts[0]:
+        rich_items, texts = rich_items[1:], texts[1:]
+    while rich_items and not texts[-1]:
+        rich_items, texts = rich_items[:-1], texts[:-1]
+    if not rich_items:
+        return None, []
+    if re.match(r"^[·●○▪\-–]\s*", texts[0]):
+        return None, [ro for ro, t in zip(rich_items, texts) if t]
+    if any(RE_URL.match(t) or re.match(r"^Pie de imagen:", t, re.I)
+           or re.match(r"^Descripci[oó]n de (la )?imagen:", t, re.I) for t in texts if t):
+        return None, [ro for ro, t in zip(rich_items, texts) if t]
+    non_empty = [(ro, t) for ro, t in zip(rich_items, texts) if t]
+    if len(non_empty) > 1 and all(":" in t and len(t.split(":", 1)[0]) <= 70 for _, t in non_empty):
+        return None, [ro for ro, _ in non_empty]
+    bullet_idx = -1
+    for k, t in enumerate(texts):
+        if re.match(r"^[·●○▪\-–]\s*|^o\s+", t, re.I):
+            bullet_idx = k
+            break
+
+    blank_idx = texts.index("") if "" in texts else -1
+
+    split_idx = -1
+    if blank_idx != -1 and bullet_idx != -1:
+        split_idx = min(blank_idx, bullet_idx)
+    elif blank_idx != -1:
+        split_idx = blank_idx
+    elif bullet_idx != -1:
+        split_idx = bullet_idx
+
+    if split_idx == -1:
+        return _join_rich_objs(non_empty), []
+
+    body_pairs = [(ro, t) for ro, t in zip(rich_items[:split_idx], texts[:split_idx]) if t]
+    rest_pairs = [(ro, t) for ro, t in zip(rich_items[split_idx:], texts[split_idx:]) if t]
+    return (_join_rich_objs(body_pairs) if body_pairs else None), [ro for ro, _ in rest_pairs]
+
+
+def _parsear_interaccion_desplegables_rich(rich_lines: list[dict]) -> list[dict]:
+    """Returns items_rich: [{titulo, titulo_rich, body_rich, subitems_rich}]."""
+    start = 0
+    for i, ro in enumerate(rich_lines):
+        if re.match(r"^Desplegables:?$", rich_text(ro).strip(), re.I):
+            start = i + 1
+            break
+    rlines = rich_lines[start:]
+    items_rich: list[dict] = []
+    i, n = 0, len(rlines)
+    while i < n:
+        while i < n and not rich_text(rlines[i]).strip():
+            i += 1
+        if i >= n:
+            break
+        titulo_ro = rlines[i]
+        titulo_txt = rich_text(titulo_ro).strip()
+        i += 1
+        contenido: list[dict] = []
+        while i < n:
+            cro = rlines[i]
+            ctxt = rich_text(cro).strip()
+            if ctxt and contenido and _parece_titulo_desplegable(ctxt):
+                j = i + 1
+                while j < n and not rich_text(rlines[j]).strip():
+                    j += 1
+                if j < n:
+                    break
+            contenido.append(cro)
+            i += 1
+        body_rich, subitems_rich = _separar_cuerpo_y_subitems_rich(list(contenido))
+        items_rich.append({
+            "titulo": titulo_txt,
+            "titulo_rich": titulo_ro,
+            "body_rich": body_rich,
+            "subitems_rich": subitems_rich,
+        })
+    return items_rich
+
+
+def expandir_interaccion(n: int, interacciones: dict[int, dict], label: str = "") -> list[dict]:
     inter = interacciones.get(n)
 
     if not inter:
         return []
     if inter.get("tipo") == "opciones":
         return []
+
+    # Interacciones de tipo texto: renderizar según el label del marcador
+    if inter.get("tipo") == "texto":
+        lineas_raw = inter.get("lineas", [])
+        lineas_rich = []
+        extra_blocks: list[dict] = []
+        for linea in lineas_raw:
+            if not linea:
+                continue
+            if debe_elim(linea):
+                continue
+            if RE_URL.match(linea):
+                extra_blocks.append({
+                    "tipo": "url_imagen" if _es_url_imagen(linea) else "url_recurso",
+                    "texto": linea,
+                })
+            elif linea.startswith("Pie de imagen:"):
+                extra_blocks.append({"tipo": "pie_imagen", "texto": linea[len("Pie de imagen:"):].strip()})
+            elif re.match(r"^Descripci[oó]n de (la )?imagen:", linea):
+                extra_blocks.append({
+                    "tipo": "desc_imagen",
+                    "texto": re.sub(r"^Descripci[oó]n de (la )?imagen:\s*", "", linea),
+                })
+            else:
+                lineas_rich.append(rich_obj(linea, [{"text": linea}]))
+
+        # Detectar tipo de actividad por el label
+        mt_colab = re.search(r"Actividad colaborativa\s*(\d*)", label, re.I)
+        mt_eval = re.search(r"Actividad de evaluaci[oó]n", label, re.I)
+        mt_apr = re.search(r"Actividad de aprendizaje\s+(\d+)", label, re.I)
+        mt_aprac = re.search(r"Aplicaci[oó]n pr[aá]ctica\s*(\d*)", label, re.I)
+        mt_tarea = re.search(r"Tarea de evaluaci[oó]n\s*(\d*)", label, re.I)
+
+        if mt_colab:
+            num = mt_colab.group(1).strip()
+            return [{"tipo": "actividad_complementaria", "etiqueta": "Actividad complementaria",
+                     "lineas": lineas_rich, "_num_collab": num}] + extra_blocks
+        elif mt_eval and lineas_rich:
+            num_eval = re.search(r"(\d+)", label[mt_eval.end():]) or re.search(r"(\d+)", label)
+            etiqueta = f"Actividad {num_eval.group(1)}" if num_eval else f"Actividad {n}"
+            return [{"tipo": "tarea", "etiqueta": etiqueta, "lineas": lineas_rich}] + extra_blocks
+        elif mt_apr and lineas_rich:
+            num = mt_apr.group(1).strip()
+            etiqueta = f"Aplicación práctica {num}".strip() if num else "Aplicación práctica"
+            return [{"tipo": "aplicacion_practica", "etiqueta": etiqueta, "lineas": lineas_rich}] + extra_blocks
+        elif mt_aprac and lineas_rich:
+            num = mt_aprac.group(1).strip()
+            etiqueta = f"Tarea {num}".strip() if num else "Tarea"
+            return [{"tipo": "tarea", "etiqueta": etiqueta, "lineas": lineas_rich}] + extra_blocks
+        elif mt_tarea and lineas_rich:
+            num = mt_tarea.group(1).strip()
+            etiqueta = f"Tarea {num}".strip() if num else "Tarea"
+            return [{"tipo": "tarea", "etiqueta": etiqueta, "lineas": lineas_rich}] + extra_blocks
+        else:
+            # Sin label especial: líneas como párrafos sueltos
+            bloques: list[dict] = []
+            for ro in lineas_rich:
+                txt = rich_text(ro)
+                limpio = _limpiar_vineta_literal(txt)
+                if limpio:
+                    if _abre_modo_lista(txt):
+                        bloques.append({"tipo": "p_vineta", "texto": rich_obj(limpio, [{"text": limpio}]), "nivel": 1})
+                    else:
+                        bloques.append({"tipo": "parrafo", "texto": ro})
+            return bloques + extra_blocks
+
     if inter.get("tipo") != "desplegables":
         return []
 
     bloques: list[dict] = []
+
+    items_rich = inter.get("items_rich", [])
+    rich_map = {item["titulo"]: item for item in items_rich}
 
     for item in inter.get("items", []):
         titulo = item.get("titulo", "").strip()
         body = item.get("body", "").strip()
         subitems = item.get("subitems", [])
 
+        rich_item = rich_map.get(titulo, {})
+        body_rich = rich_item.get("body_rich")
+        subitems_rich = rich_item.get("subitems_rich", [])
+
         if not titulo or debe_elim(titulo):
+            continue
+
+        if body and subitems:
+            bloques.append({
+                "tipo": "desplegable_procedimental",
+                "titulo": titulo,
+                "titulo_rich": rich_item.get("titulo_rich"),
+                "body": body,
+                "body_rich": body_rich,
+                "subitems": subitems,
+                "subitems_rich": subitems_rich,
+            })
             continue
 
         if body:
             bloques.append({
                 "tipo": "desplegable_simple",
                 "titulo": titulo,
+                "titulo_rich": rich_item.get("titulo_rich"),
                 "contenido": body,
+                "contenido_rich": body_rich,
             })
-        else:
-            bloques.append({
-                "tipo": "p_vineta_bold",
-                "texto": titulo + ":",
-                "nivel": 1,
-            })
+            continue
 
-        for sub in subitems:
+        # No body: decide inline vs two-level based on whether subitems have "term: desc" format.
+        # If the first subitem has a colon split (term: description), render as:
+        #   ● Title:          (bold bullet, level 1)
+        #   ○ Term: desc...   (p_desp inline, level 2)
+        # If the first subitem is plain text, absorb it inline:
+        #   ● Title: description... (p_desp inline, level 1)
+        sub_start = 0
+        if subitems:
+            first_sub = _limpiar_vineta_literal(subitems[0])
+            first_sub_rich_raw = subitems_rich[0] if subitems_rich else None
+            first_has_colon = (
+                ":" in first_sub
+                and len(first_sub.split(":", 1)[0].strip()) <= 70
+                and not re.match(r"^(Pie de imagen|Descripci[oó]n de (la )?imagen|https?://)", first_sub, re.I)
+            )
+            if first_sub and not first_has_colon:
+                # Plain description → inline with title
+                bloques.append({
+                    "tipo": "desplegable_simple",
+                    "titulo": titulo,
+                    "titulo_rich": rich_item.get("titulo_rich"),
+                    "contenido": first_sub,
+                    "contenido_rich": _limpiar_vineta_rich(first_sub_rich_raw) if first_sub_rich_raw else None,
+                })
+                sub_start = 1
+            else:
+                # Term:desc subitems → title as bold bullet, all subitems at level 2
+                tit_r = rich_item.get("titulo_rich")
+                bloques.append({
+                    "tipo": "p_vineta_bold",
+                    "texto": _titulo_con_colon(tit_r) if tit_r else (titulo + ":"),
+                    "nivel": 1,
+                })
+                sub_start = 0
+        else:
+            bloques.append({"tipo": "p_vineta_bold", "texto": titulo + ":", "nivel": 1})
+
+        for j, sub in enumerate(subitems[sub_start:], sub_start):
+            sub_rich = subitems_rich[j] if j < len(subitems_rich) else None
             sub = _limpiar_vineta_literal(sub)
             if not sub:
                 continue
 
-            # Los recursos gráficos y sus textos descriptivos no son elementos
-            # de la enumeración: deben salir como URL/pie/descripción normales.
             if RE_URL.match(sub):
                 bloques.append({
                     "tipo": "url_imagen" if _es_url_imagen(sub) else "url_recurso",
                     "texto": sub,
                 })
             elif re.match(r"^Pie de imagen:", sub, re.I):
-                bloques.append({"tipo": "pie_imagen", "texto": sub})
+                bloques.append({"tipo": "pie_imagen", "texto": re.sub(r"^Pie de imagen:\s*", "", sub, flags=re.I)})
             elif re.match(r"^Descripci[oó]n de (la )?imagen:", sub, re.I):
-                bloques.append({"tipo": "desc_imagen", "texto": sub})
+                bloques.append({"tipo": "desc_imagen", "texto": re.sub(r"^Descripci[oó]n de (la )?imagen:\s*", "", sub, flags=re.I)})
             elif ":" in sub and len(sub.split(":", 1)[0]) <= 70:
                 titulo_sub, desc_sub = sub.split(":", 1)
+                desc_rich = None
+                if sub_rich:
+                    clean_rich = _limpiar_vineta_rich(sub_rich)
+                    desc_rich = _strip_prefix_runs(clean_rich, re.escape(titulo_sub) + r"\s*:\s*")
                 bloques.append({
                     "tipo": "desplegable_simple_n2",
                     "titulo": titulo_sub.strip(),
                     "contenido": desc_sub.strip(),
+                    "contenido_rich": desc_rich,
                 })
             else:
                 bloques.append({
                     "tipo": "p_vineta",
-                    "texto": sub,
+                    "texto": sub_rich if sub_rich is not None else sub,
                     "nivel": 2,
                 })
 
@@ -1354,84 +1987,280 @@ def extraer_texto_pdf(pdf: Path) -> list[str]:
     return [page.extract_text() or "" for page in reader.pages]
 
 
-def parsear_pdf_o_texto(path: Path) -> dict:
+def parsear_pdf_o_texto(path: Path, interacciones: dict | None = None) -> dict:
+    if interacciones is None:
+        interacciones = {}
+
     if path.suffix.lower() == ".pdf":
         paginas = extraer_texto_pdf(path)
-        lines = []
+        raw_lines = []
         for pag in paginas:
-            lines.extend(pag.splitlines())
+            raw_lines.extend(pag.splitlines())
     else:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        raw_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
 
-    lines = [_norm_line(x) for x in lines]
-    lines = [x for x in lines if x and not debe_elim(x) and not es_solo_pua(x)]
+    _tipo_map = {
+        "Nota": "nota", "Ejemplo": "ejemplo",
+        "Sabías que...": "sabias_que", "Sabías que…": "sabias_que",
+        "Consejo": "consejo", "Definición": "definicion",
+        "Hilo conductor": "hilo_conductor", "Para saber más": "para_saber_mas",
+        "Vídeo": "video", "Video": "video",
+        "Importante": "importante", "Recuerda": "recuerda",
+        "Actividad complementaria": "actividad_complementaria",
+        "Actividad colaborativa": "actividad_complementaria",
+        "Actividad de evaluación": "tarea",
+        "Actividad de aprendizaje": "aplicacion_practica",
+        "Aplicación práctica": "tarea",
+        "Caso práctico": "tarea", "Ejercicio": "tarea", "Tarea": "tarea",
+    }
 
     est = {
-        "titulo_unidad": "Unidad de aprendizaje 1",
+        "titulo_unidad": "",
         "titulo_modulo": "",
         "objetivos": [],
         "secciones": [],
     }
 
-    current = None
+    current_sec = None
+    current_sub = None
+    current_sub2 = None
     en_obj = False
+    blk = None
 
-    for line in lines:
+    def activos() -> list:
+        if current_sub2:
+            return current_sub2["bloques"]
+        if current_sub:
+            return current_sub["bloques"]
+        if current_sec:
+            return current_sec["bloques"]
+        return []
+
+    _TIPOS_BLOQUE_INFO_PDF = {
+        "nota", "ejemplo", "para_saber_mas", "video", "importante",
+        "sabias_que", "consejo", "definicion", "hilo_conductor", "recuerda",
+    }
+
+    def _blk_info_activo_pdf():
+        return blk is not None and blk.get("tipo") in _TIPOS_BLOQUE_INFO_PDF
+
+    def flush_blk():
+        nonlocal blk
+        if not blk:
+            return
+        if blk.get("lineas") or blk.get("tipo") in {
+            "hilo_conductor", "video", "ejemplo", "importante", "definicion", "sabias_que",
+        }:
+            b = {k: v for k, v in blk.items() if not k.startswith("_")}
+            activos().append(b)
+        blk = None
+
+    def _add_inter_opciones(n, label, inter):
+        mt_eval = re.search(r"Actividad de evaluaci[oó]n", label, re.I)
+        mt_apr = re.search(r"Actividad de aprendizaje\s+(\d+)", label, re.I)
+        mt_aprac = re.search(r"Aplicaci[oó]n pr[aá]ctica\s*(\d*)", label, re.I)
+
+        if mt_eval:
+            # "Actividad de evaluación X" (inline) → "Actividad X" sin solución
+            num_eval = re.search(r"(\d+)", label[mt_eval.end():]) or re.search(r"(\d+)", label)
+            etiqueta = f"Actividad {num_eval.group(1)}" if num_eval else f"Actividad {n}"
+            tipo_final = "tarea"
+        elif mt_apr:
+            # "Actividad de aprendizaje X" (test) → "Aplicación práctica X" CON solución
+            tipo_final = "aplicacion_practica"
+            num_apr = mt_apr.group(1).strip()
+            etiqueta = f"Aplicación práctica {num_apr}".strip() if num_apr else "Aplicación práctica"
+        elif mt_aprac:
+            tipo_final = "tarea"
+            num_apr = mt_aprac.group(1).strip()
+            etiqueta = f"Tarea {num_apr}".strip() if num_apr else "Tarea"
+        else:
+            tipo_final, etiqueta = "tarea", label.strip() or "Tarea"
+
+        letras = "abcdefgh"
+        opciones_rich = inter.get("opciones_rich", [])
+        if opciones_rich:
+            opciones = [{"letra": letras[j], "texto": opt_rich}
+                        for j, opt_rich in enumerate(opciones_rich) if j < len(letras)]
+        else:
+            opciones = [{"letra": letras[j], "texto": opt.strip()}
+                        for j, opt in enumerate(inter.get("opciones", []))]
+
+        # El enunciado (texto de la pregunta) va como primera línea del bloque
+        enunciado_text = inter.get("enunciado", "").strip()
+        lineas = [rich_obj(enunciado_text, [{"text": enunciado_text}])] if enunciado_text else []
+
+        entry = {"tipo": tipo_final, "etiqueta": etiqueta, "lineas": lineas, "opciones": opciones}
+        if tipo_final == "aplicacion_practica":
+            entry["solucion"] = inter.get("solucion_rich") or inter.get("solucion", "")
+            entry["feedback"] = inter.get("feedback_rich") or inter.get("feedback", "")
+        activos().append(entry)
+
+    for raw in raw_lines:
+        line = _norm_line(raw)
+        if not line or es_solo_pua(line):
+            continue
+
+        # Unit / module title (before debe_elim)
         mtitulo = _match_titulo_unidad(line)
         if mtitulo:
             etiqueta_unidad, n_unidad, titulo_modulo = mtitulo
             est["titulo_unidad"] = f"{etiqueta_unidad} {n_unidad}"
-            if titulo_modulo:
+            if titulo_modulo and not est["titulo_modulo"]:
                 est["titulo_modulo"] = titulo_modulo
             continue
 
-        if line.startswith("Los objetivos específicos"):
+        if est["titulo_unidad"] and not est["titulo_modulo"] and not RE_SEC1.match(line) and not _es_cabecera_objetivos(line):
+            if line != est["titulo_unidad"] and len(line) < 120 and not RE_URL.match(line):
+                est["titulo_modulo"] = limpiar_titulo(line)
+                continue
+
+        # Objectives header
+        if _es_cabecera_objetivos(line) and not current_sec:
             en_obj = True
-            continue
-
-        if en_obj:
-            if RE_SEC1.match(line) or line == "Introducción":
-                en_obj = False
+            nueva_intro = _tipo_objetivos_intro(line)
+            if "general" in line.lower():
+                est["_current_obj_type"] = "general"
             else:
-                est["objetivos"].append(_limpiar_vineta_literal(line))
-                continue
-
-        if not est["titulo_modulo"] and line and not RE_SEC1.match(line):
-            if line != est["titulo_unidad"] and len(line) < 120:
-                est["titulo_modulo"] = line
-                continue
-
-        m = RE_SEC1.match(line)
-        if m:
-            sec = {
-                "num": m.group(1),
-                "titulo": limpiar_titulo(m.group(2)),
-                "bloques": [],
-                "subsecciones": [],
-            }
-            est["secciones"].append(sec)
-            current = sec
+                est["_current_obj_type"] = "especifico"
+            if "específico" in line.lower() or "especifico" in line.lower():
+                est["_objectives_intro"] = nueva_intro
             continue
 
-        if current:
-            if RE_URL.match(line):
-                current["bloques"].append({
-                    "tipo": "url_imagen" if _es_url_imagen(line) else "url",
-                    "url": line,
-                })
-            elif line.startswith("Pie de imagen:"):
-                current["bloques"].append({
-                    "tipo": "pie_imagen",
-                    "texto": line[len("Pie de imagen:"):].strip(),
-                })
-            elif re.match(r"^Descripci[oó]n de (la )?imagen:", line):
-                current["bloques"].append({
+        # Inside objectives section
+        if en_obj:
+            if RE_SEC1.match(line) or line == "Introducción" or _es_cabecera_no_contenido(line) or any(line.startswith(p) for p in BLOQUES_ESP):
+                en_obj = False
+                # fall through to section handling below
+            else:
+                if debe_elim(line):
+                    continue
+                if est.get("_current_obj_type") == "general":
+                    est["objetivo_general"] = line
+                    continue
+                limpio = _limpiar_vineta_literal(line)
+                if limpio and not re.match(r"^CE\s+[a-z]", limpio, re.I) and not re.match(r"^RA\d+[.\s]", limpio, re.I):
+                    est["objetivos"].append(limpio)
+                continue
+
+        # Intercept "Enunciado:" for active blocks before debe_elim eats it
+        if blk and (line == "Enunciado" or line.startswith("Enunciado:")):
+            blk.pop("_skip_obj", None)
+            blk.setdefault("enunciado_linea", len(blk.get("lineas", [])))
+            continue
+
+        if debe_elim(line):
+            continue
+
+        # Section headers (RE_SEC3 > RE_SEC2 > RE_SEC1)
+        m3 = RE_SEC3.match(line)
+        m2 = RE_SEC2.match(line)
+        m1 = RE_SEC1.match(line)
+
+        if m3 and current_sub:
+            flush_blk()
+            num = f"{current_sub['num']}.{m3.group(3)}"
+            current_sub2 = {"num": num, "titulo": limpiar_titulo(m3.group(4)), "bloques": [], "subsecciones": []}
+            current_sub.setdefault("subsecciones", []).append(current_sub2)
+            continue
+
+        if m2 and current_sec:
+            flush_blk()
+            num = f"{current_sec['num']}.{m2.group(2)}"
+            current_sub = {"num": num, "titulo": limpiar_titulo(m2.group(3)), "bloques": [], "subsecciones": []}
+            current_sub2 = None
+            current_sec.setdefault("subsecciones", []).append(current_sub)
+            continue
+
+        if m1:
+            flush_blk()
+            current_sec = {"num": m1.group(1), "titulo": limpiar_titulo(m1.group(2)), "bloques": [], "subsecciones": []}
+            current_sub = None
+            current_sub2 = None
+            est["secciones"].append(current_sec)
+            continue
+
+        if line == "Introducción":
+            flush_blk()
+            current_sec = {"num": "", "titulo": "Introducción", "bloques": [], "subsecciones": []}
+            current_sub = None
+            current_sub2 = None
+            est["secciones"].append(current_sec)
+            continue
+
+        if not current_sec:
+            continue
+
+        # Interaction references
+        mi = RE_INTER.match(line)
+        if mi:
+            flush_blk()
+            n = int(mi.group(1))
+            label = (mi.group(2) or "").strip()
+            inter = interacciones.get(n, {})
+            if inter.get("tipo") == "opciones":
+                _add_inter_opciones(n, label, inter)
+            else:
+                for b in expandir_interaccion(n, interacciones, label):
+                    activos().append(b)
+            continue
+
+        # Standalone block markers (e.g. "Para saber más", "Nota")
+        if line in BLOQUES_ESP:
+            flush_blk()
+            tipo = _tipo_map.get(line, "ejemplo")
+            etiqueta = normalizar_etiqueta_actividad(line) if RE_ACTIVITY_LABEL.match(line) else line
+            blk = {"tipo": tipo, "etiqueta": etiqueta, "lineas": [], "_estilo": "text"}
+            continue
+
+        # Activity labels with optional number: "Actividad colaborativa 1", "Aplicación práctica 1"
+        if RE_ACTIVITY_LABEL.match(line):
+            flush_blk()
+            m_act = RE_ACTIVITY_LABEL.match(line)
+            base = m_act.group(1).strip()
+            tipo = _tipo_map.get(base, "tarea")
+            etiqueta = normalizar_etiqueta_actividad(line)
+            blk = {"tipo": tipo, "etiqueta": etiqueta, "lineas": [], "_estilo": "text"}
+            continue
+
+        # URL / image blocks
+        if RE_URL.match(line):
+            if _blk_info_activo_pdf():
+                blk.setdefault("lineas", []).append(rich_obj(line, [{"text": line, "link": line}]))
+            else:
+                flush_blk()
+                activos().append({"tipo": "url_imagen" if _es_url_imagen(line) else "url", "url": line})
+            continue
+
+        if line.startswith("Pie de imagen:"):
+            if _blk_info_activo_pdf():
+                blk.setdefault("lineas", []).append(rich_obj(line, [{"text": line}]))
+            else:
+                activos().append({"tipo": "pie_imagen", "texto": line[len("Pie de imagen:"):].strip()})
+            continue
+
+        if re.match(r"^Descripci[oó]n de (la )?imagen:", line):
+            if _blk_info_activo_pdf():
+                blk.setdefault("lineas", []).append(rich_obj(line, [{"text": line}]))
+            else:
+                activos().append({
                     "tipo": "desc_imagen",
                     "texto": re.sub(r"^Descripci[oó]n de (la )?imagen:\s*", "", line),
                 })
-            else:
-                current["bloques"].append({"tipo": "parrafo", "texto": line})
+            continue
 
+        # Content within active block
+        if blk:
+            if line.startswith(("Objetivos:", "Objetivo:")):
+                blk["_skip_obj"] = True
+            elif not blk.get("_skip_obj") and not _es_marcador_solucion(line) and not line.startswith("Duración:"):
+                blk.setdefault("lineas", []).append(rich_obj(line, [{"text": line}]))
+            continue
+
+        # Regular paragraph
+        activos().append({"tipo": "parrafo", "texto": rich_obj(line, [{"text": line}])})
+
+    flush_blk()
     return est
 
 
@@ -1549,22 +2378,55 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
         letras = "abcdefgh"
         opciones = []
 
-        for j, opt in enumerate(inter.get("opciones", [])):
-            opciones.append({
-                "letra": letras[j],
-                "texto": re.sub(r"^[a-h]\)\s*", "", opt.strip()),
-            })
+        opciones_rich = inter.get("opciones_rich", [])
+        if opciones_rich:
+            for j, opt_rich in enumerate(opciones_rich):
+                if j < len(letras):
+                    opciones.append({"letra": letras[j], "texto": opt_rich})
+        else:
+            for j, opt in enumerate(inter.get("opciones", [])):
+                opciones.append({
+                    "letra": letras[j],
+                    "texto": re.sub(r"^[a-h]\)\s*", "", opt.strip()),
+                })
 
         tipo_final = blk.get("_tipo_final", "tarea")
+        enunciado_text = inter.get("enunciado", "").strip()
+
+        # Some interaction cells begin with a generic UI label ("Opciones de respuesta:",
+        # "Opciones:", etc.) before the lettered choices. That label is not the actual
+        # question enunciado, so we must not let it override the real body paragraphs.
+        _RE_GENERIC_INTER_LABEL = re.compile(
+            r"^(Opciones?(?:\s+de\s+respuesta)?|Enunciado|Instrucci[oó]n|Desplegables?)\s*:?\s*$",
+            re.I,
+        )
+        _inter_enunciado_es_etiqueta = bool(
+            not enunciado_text or _RE_GENERIC_INTER_LABEL.match(enunciado_text)
+        )
+
+        lineas_cuerpo_raw = [x for x in blk.get("lineas", []) if rich_text(x).strip()]
+
+        if enunciado_text and not _inter_enunciado_es_etiqueta and not lineas_cuerpo_raw:
+            # The interaction cell has a genuine question text AND there are no body
+            # paragraphs — use the cell content as the enunciado.
+            enunciado_lineas = [rich_obj(enunciado_text, [{"text": enunciado_text}])]
+            lineas_cuerpo = []
+        else:
+            # Body paragraphs take priority: they contain the real question/exercise text.
+            # The interaction cell may only have a generic label ("Opciones de respuesta:")
+            # that is not the actual enunciado.
+            enunciado_lineas = []
+            lineas_cuerpo = lineas_cuerpo_raw
+
         entry = {
             "tipo": tipo_final,
             "etiqueta": blk.get("etiqueta", "Aplicación práctica"),
-            "lineas": [x for x in blk.get("lineas", []) if rich_text(x).strip()],
+            "lineas": enunciado_lineas + lineas_cuerpo,
             "opciones": opciones,
         }
         if tipo_final == "aplicacion_practica":
-            entry["solucion"] = inter.get("solucion", "")
-            entry["feedback"] = inter.get("feedback", "")
+            entry["solucion"] = inter.get("solucion_rich") or inter.get("solucion", "")
+            entry["feedback"] = inter.get("feedback_rich") or inter.get("feedback", "")
         activos().append(entry)
 
         blk = None
@@ -1593,11 +2455,17 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
         flush()
         activos().append(b)
 
-    def nueva_sec(titulo: str):
+    def nueva_sec(num: str, titulo: str):
         nonlocal current_sec, current_sub, current_sub2, sec_count, sub_count, sub2_count
 
         flush()
-        sec_count += 1
+        if num:
+            try:
+                sec_count = max(sec_count, int(str(num)))
+            except Exception:
+                pass
+        else:
+            sec_count += 1
         sub_count = 0
         sub2_count = 0
         current_sec = {
@@ -1616,7 +2484,7 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
         flush()
 
         if not current_sec:
-            nueva_sec("Introducción")
+            nueva_sec("", "Introducción")
 
         if num:
             try:
@@ -1670,7 +2538,9 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
         "Importante": "importante",
         "Nota": "nota",
         "Consejo": "consejo",
-        "Aplicación práctica": "tarea",
+        "Para saber más": "para_saber_mas",
+        "Aplicación práctica": "aplicacion_practica",
+        "Actividad de aprendizaje": "aplicacion_practica",
         "Sabiasque": "sabias_que",
         "Definición": "definicion",
     }
@@ -1683,27 +2553,150 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
         "Vietanvl21d",
         "Ejemplos - Viñeta nvl1",
         "Ejemplos-Vietanvl1",
-        "Ejemplos Vieta nvl1",
+        "Recuerda - Viñeta nvl1",
+        "Recuerda-Vietanvl1",
     }
 
-    for child in doc.element.body:
-        is_para = child.tag == qn("w:p")
-        is_tbl = child.tag == qn("w:tbl")
+    def _aplanar_elementos(body):
+        elementos = []
+        for child in body:
+            if child.tag == qn("w:p"):
+                elementos.append(child)
+            elif child.tag == qn("w:tbl"):
+                elementos.append(child)
+        return elementos
 
-        if is_tbl:
+    def _load_num_fmt_map() -> dict:
+        """Returns {(numId_str, ilvl_str): numFmt_str} from the document's numbering part."""
+        result: dict = {}
+        try:
+            nbp = doc.part.numbering_part
+            if nbp is None:
+                return result
+            nxml = nbp._element
+            abstract_defs: dict = {}
+            for abn in nxml.findall(qn("w:abstractNum")):
+                abs_id = abn.get(qn("w:abstractNumId"))
+                if abs_id is None:
+                    continue
+                levels: dict = {}
+                for lvl in abn.findall(qn("w:lvl")):
+                    ilvl = lvl.get(qn("w:ilvl"))
+                    fmt_el = lvl.find(qn("w:numFmt"))
+                    if fmt_el is not None:
+                        levels[ilvl] = fmt_el.get(qn("w:val"), "")
+                abstract_defs[abs_id] = levels
+            for num in nxml.findall(qn("w:num")):
+                num_id = num.get(qn("w:numId"))
+                if num_id is None:
+                    continue
+                abs_ref = num.find(qn("w:abstractNumId"))
+                if abs_ref is not None:
+                    abs_id = abs_ref.get(qn("w:val"))
+                    if abs_id in abstract_defs:
+                        for ilvl, fmt in abstract_defs[abs_id].items():
+                            result[(num_id, ilvl)] = fmt
+        except Exception:
+            pass
+        return result
+
+    _num_fmt_map = _load_num_fmt_map()
+    _numpr_idx: dict = {}  # (numId, ilvl) → next index (0-based)
+
+    def _numpr_prefix(para_el) -> str:
+        """Return the auto-number prefix for a paragraph with numPr, or '' if none."""
+        try:
+            pPr = para_el.find(qn("w:pPr"))
+            if pPr is None:
+                return ""
+            numPr = pPr.find(qn("w:numPr"))
+            if numPr is None:
+                return ""
+            num_id_el = numPr.find(qn("w:numId"))
+            ilvl_el = numPr.find(qn("w:ilvl"))
+            if num_id_el is None or ilvl_el is None:
+                return ""
+            num_id = num_id_el.get(qn("w:val"), "0")
+            ilvl = ilvl_el.get(qn("w:val"), "0")
+            if num_id == "0":
+                return ""
+            key = (num_id, ilvl)
+            fmt = _num_fmt_map.get(key, "")
+            idx = _numpr_idx.get(key, 0)
+            _numpr_idx[key] = idx + 1
+            if fmt == "lowerLetter":
+                return chr(ord('a') + idx % 26) + ") "
+            if fmt == "upperLetter":
+                return chr(ord('A') + idx % 26) + ") "
+            if fmt in ("decimal", "decimalZero"):
+                return str(idx + 1) + ". "
+            if fmt == "lowerRoman":
+                _roman = ["i","ii","iii","iv","v","vi","vii","viii","ix","x"]
+                return (_roman[idx] if idx < len(_roman) else str(idx+1)) + ". "
+            if fmt == "upperRoman":
+                _roman = ["I","II","III","IV","V","VI","VII","VIII","IX","X"]
+                return (_roman[idx] if idx < len(_roman) else str(idx+1)) + ". "
+        except Exception:
+            pass
+        return ""
+
+    def _es_inicio_bloque_cualquiera(t, s):
+        if s in special_styles:
+            return True
+        if t in BLOQUES_ESP:
+            return True
+        if RE_ACTIVITY_LABEL.match(t):
+            return True
+        base_esp = {"Nota", "Ejemplo", "Vídeo", "Video", "Importante", "Recuerda", "Sabías que"}
+        for b in base_esp:
+            if re.match(rf"^{b}(?:\s+\d+)?$", t, re.I):
+                return True
+        return False
+
+    # Tipos de bloque informativo (texto) que deben absorber párrafos siguientes
+    _TIPOS_BLOQUE_INFO = {
+        "nota", "ejemplo", "para_saber_mas", "video", "importante",
+        "sabias_que", "consejo", "definicion", "hilo_conductor", "recuerda",
+    }
+
+    def _blk_texto_activo():
+        return (blk is not None
+                and blk.get("_estilo") == "_texto"
+                and blk.get("tipo") in _TIPOS_BLOQUE_INFO)
+
+    for child in _aplanar_elementos(doc.element.body):
+        if child.tag == qn("w:tbl"):
             tbl = DTable(child, doc)
-            flush()
-
+            filas = []
             for row in tbl.rows:
-                txt = row.cells[0].text.strip() if row.cells else ""
-                if txt and current_sec:
-                    activos().append({
-                        "tipo": "p_vineta",
-                        "texto": txt,
-                        "nivel": 1,
-                    })
+                fila = []
+                seen_tc = set()
+                for cell in row.cells:
+                    cid = id(cell._tc)
+                    if cid in seen_tc:
+                        continue
+                    seen_tc.add(cid)
+                    cell_lines = []
+                    for para in cell.paragraphs:
+                        ptxt = _norm_line(para.text)
+                        if ptxt:
+                            cell_lines.append(ptxt)
+                    fila.append("\n".join(cell_lines))
+                filas.append(fila)
+            if any(any(c for c in row) for row in filas):
+                tabla_blk = {"tipo": "tabla", "filas": filas}
+                _tipos_absorb = {
+                    "nota", "ejemplo", "para_saber_mas", "video", "importante",
+                    "sabias_que", "consejo", "definicion", "hilo_conductor", "recuerda",
+                    "actividad_complementaria", "tarea", "aplicacion_practica",
+                }
+                if _blk_texto_activo() or (blk is not None and blk.get("tipo") in _tipos_absorb):
+                    blk.setdefault("lineas", []).append(tabla_blk)
+                else:
+                    flush()
+                    activos().append(tabla_blk)
             continue
-
+        is_para = child.tag == qn("w:p")
         if not is_para:
             continue
 
@@ -1713,8 +2706,17 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
         rich = _rich_para(para)
         bold = _is_bold(para)
 
+        # Prepend auto-number prefix (a), b), 1., etc.) when the paragraph uses numPr
+        # and the actual number character is NOT in the paragraph's <w:t> content.
+        _np = _numpr_prefix(child)
+        if _np and txt and not txt.startswith(_np.strip()):
+            txt = _np + txt
+            runs = [{"text": _np}] + list(rich_runs(rich))
+            rich = rich_obj(txt, runs)
+
         if es_solo_pua(txt):
             continue
+
 
         if txt in {"", "Cambio de pantalla", "Específicos"} and style not in special_styles:
             # Si venimos recogiendo un bloque especial (tarea, ejemplo, etc.),
@@ -1724,11 +2726,16 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
                 flush()
             continue
 
-        if _es_cabecera_objetivos(txt) and style not in special_styles:
+        if _es_cabecera_objetivos(txt) and style not in special_styles and not current_sec:
             en_objetivos = True
             ignorar_hasta_contenido = False
-            if not est.get("_objectives_intro"):
-                est["_objectives_intro"] = _tipo_objetivos_intro(txt)
+            nueva_intro = _tipo_objetivos_intro(txt)
+            if "general" in txt.lower():
+                est["_current_obj_type"] = "general"
+            else:
+                est["_current_obj_type"] = "especifico"
+            if "específico" in txt.lower() or "especifico" in txt.lower():
+                est["_objectives_intro"] = nueva_intro
             continue
 
         if _es_cabecera_no_contenido(txt) and not current_sec:
@@ -1736,14 +2743,32 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
             ignorar_hasta_contenido = True
             continue
 
-        if debe_elim(txt):
+        if blk and blk.get("_estilo") in {"Aplicación práctica", "_texto"} and (txt == "Enunciado" or txt.startswith("Enunciado:")):
+            blk.pop("_skip_obj", None)
+            blk.setdefault("enunciado_linea", len(blk.get("lineas", [])))
+            # Extract text after "Enunciado:" label — the paragraph often contains
+            # both the label and the enunciado text in the same run.
+            if txt.startswith("Enunciado:"):
+                content = txt[len("Enunciado:"):].strip()
+                if content:
+                    blk.setdefault("lineas", []).append(rich_obj(content, [{"text": content}]))
             continue
+
+        if debe_elim(txt):
+            # Inside an open "Actividad colaborativa" block, preserve all content
+            # so the full activity description is transferred to paper format.
+            if not (blk is not None and blk.get("_estilo") == "Actividad colaborativa"):
+                continue
 
         if blk and blk.get("tipo") == "_ejercicio_pendiente":
             es_fin = False
 
             if style.startswith("Heading"):
                 es_fin = True
+            elif txt == "Enunciado" or txt.startswith("Enunciado:"):
+                # Enunciado content is always part of the current exercise block,
+                # regardless of its paragraph style (which may be "Aplicación práctica").
+                pass  # es_fin stays False
             elif style in special_styles:
                 es_fin = True
             elif RE_INTER.match(txt):
@@ -1785,14 +2810,18 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
                 continue
 
         if en_objetivos:
-            if style.startswith("Heading") or RE_SEC1.match(txt) or txt == "Introducción" or _es_cabecera_no_contenido(txt):
+            if (style.startswith("Heading") or RE_SEC1.match(txt) or txt == "Introducción" 
+                or _es_cabecera_no_contenido(txt) or _es_inicio_bloque_cualquiera(txt, style)):
                 en_objetivos = False
                 if _es_cabecera_no_contenido(txt):
                     ignorar_hasta_contenido = True
                     continue
             elif txt and not txt.startswith("CE ") and not re.match(r"^[a-h]\)\s*Se han", txt, re.I):
                 if not re.match(r"^RA\d+[.\s]", txt, re.I):
-                    est["objetivos"].append(_limpiar_vineta_rich(rich))
+                    if est.get("_current_obj_type") == "general":
+                        est["objetivo_general"] = rich
+                    else:
+                        est.setdefault("objetivos", []).append(_limpiar_vineta_rich(rich))
                 continue
 
         if ignorar_hasta_contenido and not current_sec:
@@ -1805,50 +2834,63 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
         m2h = RE_SEC2.match(txt)
         m1h = RE_SEC1.match(txt)
 
-        if style == "Heading 1" or style == "1 Título nvl1":
+        if style == "Heading 1" or style == "1 Título nv11":
             if txt == "Introducción":
-                nueva_sec("Introducción")
+                nueva_sec("", "Introducción")
                 continue
             if m3h and current_sub:
-                nueva_sub2(f"{current_sub.get("num", current_sec.get("num", m3h.group(1)) + "." + m3h.group(2))}.{m3h.group(3)}", m3h.group(4))
+                nueva_sub2(f"{current_sub.get('num', current_sec.get('num', m3h.group(1)) + '.' + m3h.group(2))}.{m3h.group(3)}", m3h.group(4))
                 continue
             if m2h and current_sec:
-                nueva_sub(f"{current_sec.get("num", m2h.group(1))}.{m2h.group(2)}", m2h.group(3))
+                nueva_sub(f"{current_sec.get('num', m2h.group(1))}.{m2h.group(2)}", m2h.group(3))
                 continue
             if m1h:
-                nueva_sec(m1h.group(2))
+                nueva_sec(m1h.group(1), m1h.group(2))
             else:
-                nueva_sec(txt)
+                nueva_sec("", txt)
             continue
 
-        if style == "Heading 2" or style == "2 Título nvl2":
+        if style == "Heading 2" or style == "2 Título nv12":
             if m3h and current_sub:
-                nueva_sub2(f"{current_sub.get("num", current_sec.get("num", m3h.group(1)) + "." + m3h.group(2))}.{m3h.group(3)}", m3h.group(4))
+                nueva_sub2(f"{current_sub.get('num', current_sec.get('num', m3h.group(1)) + '.' + m3h.group(2))}.{m3h.group(3)}", m3h.group(4))
             elif m2h:
-                nueva_sub(f"{current_sec.get("num", m2h.group(1))}.{m2h.group(2)}", m2h.group(3))
+                nueva_sub(f"{current_sec.get('num', m2h.group(1))}.{m2h.group(2)}", m2h.group(3))
             else:
                 nueva_sub("", txt)
             continue
 
-        if style == "Heading 3" or style == "3 Título nvl3":
+        if style == "Heading 3" or style == "3 Título nv13":
             if m3h:
-                nueva_sub2(f"{current_sub.get("num", current_sec.get("num", m3h.group(1)) + "." + m3h.group(2))}.{m3h.group(3)}", m3h.group(4))
+                nueva_sub2(f"{current_sub.get('num', current_sec.get('num', m3h.group(1)) + '.' + m3h.group(2))}.{m3h.group(3)}", m3h.group(4))
+            elif m2h:
+                nueva_sub(f"{current_sec.get('num', m2h.group(1))}.{m2h.group(2)}", m2h.group(3))
+            elif m1h:
+                nueva_sec(m1h.group(1), m1h.group(2))
             else:
                 nueva_sub2("", txt)
             continue
 
         if current_sec is None and txt == "Introducción":
-            nueva_sec("Introducción")
+            nueva_sec("", "Introducción")
             continue
 
         # Dentro de una tarea de evaluación, las líneas numeradas del enunciado
         # (1., 2., 3...) son instrucciones, no títulos de nuevas secciones.
-        if blk and blk.get("_estilo") == "Aplicación práctica" and txt:
+        if blk and blk.get("_estilo") in {"Aplicación práctica", "_texto"} and txt and not RE_INTER.match(txt):
             # Seguimos dentro del mismo recurso práctico mientras el estilo continúe
-            # siendo "Aplicación práctica". Regla editorial: la solución o posible
-            # solución solo se conserva en Aplicación práctica; en Tarea y demás
-            # recursos prácticos se elimina hasta que empiece otro bloque.
-            if RE_INTER.match(txt) or style.startswith("Heading") or (style in special_styles and style != blk.get("_estilo")):
+            # siendo "Aplicación práctica" o estemos en un bloque de texto aplanado (_texto).
+            # Cerramos el bloque solo si:
+            #   - Es un Heading (nueva sección)
+            #   - Es un special_style que además es la CABECERA de ese bloque (txt == label del estilo),
+            #     lo que indica que empieza un bloque especial nuevo, no líneas de contenido del mismo bloque.
+            # NOTE: RE_INTER is excluded here so blk remains intact for the rescue code
+            # at the RE_INTER handler below, which needs blk.lineas to carry the enunciado.
+            es_nueva_cabecera_especial = (
+                style in special_styles
+                and style != blk.get("_estilo")
+                and _es_inicio_bloque_cualquiera(txt, style)
+            )
+            if style.startswith("Heading") or es_nueva_cabecera_especial:
                 flush()
             else:
                 if _es_marcador_solucion(txt):
@@ -1867,9 +2909,16 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
                     blk.setdefault("solucion_lineas", []).append(rich)
                     continue
                 if txt == "Enunciado" or txt.startswith("Enunciado:"):
+                    blk.pop("_skip_obj", None)
                     blk.setdefault("enunciado_linea", len(blk.get("lineas", [])))
-                elif txt != "Enunciado" and not txt.startswith(("Duración:", "Objetivo:", "Objetivos:", "Enunciado:")) and not debe_elim(txt):
-                    blk.setdefault("lineas", []).append(rich)
+                elif txt.startswith(("Objetivos:", "Objetivo:")):
+                    blk["_skip_obj"] = True
+                elif not blk.get("_skip_obj") and txt != "Enunciado" and not txt.startswith(("Duración:", "Objetivo:", "Objetivos:", "Enunciado:")) and not debe_elim(txt):
+                    if style in list_styles:
+                        nivel_v = 2 if "nvl2" in style.lower() or "21" in style else 1
+                        blk.setdefault("lineas", []).append(_prefix_rich(f"{VINETA_SIM[nivel_v]} ", _limpiar_vineta_rich(rich)))
+                    else:
+                        blk.setdefault("lineas", []).append(rich)
                 continue
 
         m3 = RE_SEC3.match(txt)
@@ -1884,7 +2933,7 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
 
         m1 = RE_SEC1.match(txt)
         if m1 and len(m1.group(2)) < 120:
-            nueva_sec(m1.group(2))
+            nueva_sec(m1.group(1), m1.group(2))
             continue
 
         if not current_sec:
@@ -1892,36 +2941,75 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
 
         mi = RE_INTER.match(txt)
         if mi:
-            flush()
-
             n = int(mi.group(1))
             label = (mi.group(2) or "").strip()
             inter = interacciones.get(n, {})
 
+            # When the preceding block ("Aplicación práctica" / "tarea") has
+            # accumulated the enunciado, we must NOT flush it away before building
+            # the exercise entry — instead, rescue its lineas and discard the blk.
+            lineas_rescatadas: list = []
+            etiqueta_rescatada: str = ""
+            if (inter.get("tipo") == "opciones"
+                    and blk
+                    and blk.get("_estilo") in {"Aplicación práctica", "tarea"}
+                    and not blk.get("_ejercicio_pendiente")):
+                lineas_rescatadas = [x for x in blk.get("lineas", []) if rich_text(x).strip()]
+                etiqueta_rescatada = blk.get("etiqueta", "")
+                blk = None  # discard without adding to activos
+
+            flush()  # flush any remaining unrelated block
+
             if inter.get("tipo") == "opciones":
-                mt_eval = re.search(r"Actividad de evaluaci[oó]n\s+(\d+)", label, re.I)
+                mt_eval = re.search(r"Actividad de evaluaci[oó]n", label, re.I)
                 mt_apr = re.search(r"Actividad de aprendizaje\s+(\d+)", label, re.I)
+                mt_aprac = re.search(r"Aplicaci[oó]n pr[aá]ctica\s*(\d*)", label, re.I)
+
                 if mt_eval:
+                    # "Actividad de evaluación X CE y" (inline) → "Actividad X" sin solución
                     _tipo_final = "tarea"
-                    _etiqueta = f"Actividad {mt_eval.group(1)}"
+                    num_eval = re.search(r"(\d+)", label[mt_eval.end():]) or re.search(r"(\d+)", label)
+                    _etiqueta = f"Actividad {num_eval.group(1)}" if num_eval else f"Actividad {n}"
                 elif mt_apr:
+                    # "Actividad de aprendizaje X" (test) → "Aplicación práctica X" CON solución
                     _tipo_final = "aplicacion_practica"
-                    _etiqueta = "Aplicación práctica"
+                    num_apr = mt_apr.group(1).strip()
+                    _etiqueta = f"Aplicación práctica {num_apr}".strip() if num_apr else "Aplicación práctica"
+                elif mt_aprac:
+                    _tipo_final = "tarea"
+                    num_apr = mt_aprac.group(1).strip()
+                    _etiqueta = f"Tarea {num_apr}".strip() if num_apr else "Tarea"
                 else:
                     _tipo_final = "tarea"
-                    _etiqueta = label.strip() or "Tarea"
+                    _etiqueta = label.strip() or etiqueta_rescatada or "Tarea"
 
                 blk = {
                     "tipo": "_ejercicio_pendiente",
                     "_estilo": "_ejercicio",
                     "_tipo_final": _tipo_final,
                     "etiqueta": _etiqueta,
-                    "lineas": [],
+                    "lineas": lineas_rescatadas,  # enunciado from preceding block
                     "inter": inter,
                 }
             else:
-                for b in expandir_interaccion(n, interacciones):
+                for b in expandir_interaccion(n, interacciones, label):
                     activos().append(b)
+            continue
+
+        if RE_URL.match(txt):
+            flush()
+            activos().append({"tipo": "url_imagen" if _es_url_imagen(txt) else "url", "url": txt})
+            continue
+
+        if txt.startswith("Pie de imagen:"):
+            flush()
+            activos().append({"tipo": "pie_imagen", "texto": txt[len("Pie de imagen:"):].strip()})
+            continue
+
+        if re.match(r"^Descripci[oó]n de (la )?imagen:", txt, re.I):
+            flush()
+            activos().append({"tipo": "desc_imagen",
+                              "texto": re.sub(r"^Descripci[oó]n de (la )?imagen:\s*", "", txt)})
             continue
 
         if style in special_styles:
@@ -2036,9 +3124,10 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
                     blk["lineas"].append(rich)
                 continue
 
-            if style in {"Nota", "Consejo"}:
-                label = style  # "Nota" o "Consejo"
-                tipo_real = "nota" if style == "Nota" else "consejo"
+            if style in {"Nota", "Consejo", "Para saber más"}:
+                _tipo_label_map = {"Nota": "nota", "Consejo": "consejo", "Para saber más": "para_saber_mas"}
+                tipo_real = _tipo_label_map[style]
+                label = style
                 if txt == label or not blk or blk.get("_estilo") != style:
                     flush()
                     blk = {
@@ -2104,9 +3193,8 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
                     if es_aplicacion:
                         blk = {
                             "tipo": "tarea",
-                            "etiqueta": f"Tarea {num or '1'}",
+                            "etiqueta": f"Tarea {num}".strip() if num else "Tarea",
                             "lineas": [],
-                            "solucion_lineas": [],
                             "_estilo": style,
                             "_skip_solucion": False,
                         }
@@ -2138,7 +3226,55 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
                     elif blk.get("_skip_obj"):
                         pass
                     elif txt and not re.match(r"^(Aplicaci[oó]n pr[aá]ctica|Tarea(?: de evaluaci[oó]n)?)\b", txt, re.I) and not txt.startswith("Duración:"):
-                        blk["lineas"].append(rich)
+                        if style in list_styles:
+                            nivel_v = 2 if "nvl2" in style.lower() or "21" in style else 1
+                            blk["lineas"].append(_prefix_rich(f"{VINETA_SIM[nivel_v]} ", _limpiar_vineta_rich(rich)))
+                        else:
+                            blk["lineas"].append(rich)
+                continue
+
+            if style == "Actividad de aprendizaje":
+                if _es_marcador_solucion(txt):
+                    if blk and blk.get("_estilo") == style:
+                        if _bloque_admite_solucion(blk):
+                            blk["_capturando_solucion"] = True
+                            blk.setdefault("solucion_lineas", []).append(rich)
+                        else:
+                            blk["_skip_solucion"] = True
+                    continue
+
+                mt = re.search(r"(?:Actividad\s+de\s+aprendizaje|Aplicaci[oó]n\s+pr[aá]ctica)\s+(\d+)", txt, re.I)
+                if not blk or blk.get("_estilo") != style:
+                    flush()
+                    num = mt.group(1) if mt else ""
+                    blk = {
+                        "tipo": "aplicacion_practica",
+                        "etiqueta": f"Aplicación práctica {num}".strip() if num else "Aplicación práctica",
+                        "lineas": [],
+                        "_estilo": "Actividad de aprendizaje",
+                        "_skip_solucion": False,
+                    }
+                elif blk.get("_skip_solucion") and not _bloque_admite_solucion(blk):
+                    continue
+                elif blk.get("_capturando_solucion") and _bloque_admite_solucion(blk):
+                    blk.setdefault("solucion_lineas", []).append(rich)
+                    continue
+                else:
+                    if txt.startswith(("Objetivos:", "Objetivo:")):
+                        blk["_skip_obj"] = True
+                    elif txt == "Enunciado" or txt.startswith("Enunciado:"):
+                        blk.pop("_skip_obj", None)
+                        content = txt[len("Enunciado:"):].strip() if txt.startswith("Enunciado:") else ""
+                        if content:
+                            blk["lineas"].append(rich_obj(content, [{"text": content}]))
+                    elif blk.get("_skip_obj"):
+                        pass
+                    elif txt and not re.match(r"^Actividad\s+de\s+aprendizaje\b", txt, re.I) and not txt.startswith("Duración:"):
+                        if style in list_styles:
+                            nivel_v = 2 if "nvl2" in style.lower() or "21" in style else 1
+                            blk["lineas"].append(_prefix_rich(f"{VINETA_SIM[nivel_v]} ", _limpiar_vineta_rich(rich)))
+                        else:
+                            blk["lineas"].append(rich)
                 continue
 
         if blk and blk.get("_estilo") and style in list_styles:
@@ -2146,10 +3282,27 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
                 blk.setdefault("lineas", []).append(_prefix_rich("● ", _limpiar_vineta_rich(rich)))
             continue
 
-        if blk and blk.get("_estilo") and style not in special_styles:
+        if blk and blk.get("_estilo") and blk.get("_estilo") != "_texto" and style not in special_styles:
             flush()
 
-        if txt in BLOQUES_ESP:
+        def _obtener_base_bloque(t):
+            if t in BLOQUES_ESP:
+                return t
+            if RE_ACTIVITY_LABEL.match(t):
+                m = RE_ACTIVITY_LABEL.match(t)
+                return m.group(1)
+            base_esp = {"Nota", "Ejemplo", "Vídeo", "Video", "Importante", "Recuerda", "Sabías que"}
+            for b in base_esp:
+                if re.match(rf"^{b}(?:\s+\d+)?$", t, re.I):
+                    if b in {"Vídeo", "Video"}:
+                        return "Vídeo"
+                    if b == "Sabías que":
+                        return "Sabías que..."
+                    return b
+            return None
+
+        base_bloque = _obtener_base_bloque(txt)
+        if base_bloque:
             flush()
 
             tipo_map = {
@@ -2174,8 +3327,10 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
                 "Tarea": "tarea",
             }
 
-            tipo_detectado = tipo_map.get(txt, "ejemplo")
+            tipo_detectado = tipo_map.get(base_bloque, "ejemplo")
             etiqueta = normalizar_etiqueta_actividad(txt) if RE_ACTIVITY_LABEL.match(txt) else txt
+            if base_bloque == "Aplicación práctica":
+                etiqueta = re.sub(r"^Aplicaci[oó]n\s+pr[aá]ctica\b\s*", "Tarea ", etiqueta, flags=re.I).strip()
             blk = {
                 "tipo": tipo_detectado,
                 "etiqueta": etiqueta,
@@ -2186,33 +3341,40 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
             continue
 
         if RE_URL.match(txt):
-            add({
-                "tipo": "url_imagen" if _es_url_imagen(txt) else "url",
-                "url": txt,
-            })
+            if _blk_texto_activo():
+                blk.setdefault("lineas", []).append(rich_obj(txt, [{"text": txt, "link": txt}]))
+            else:
+                add({
+                    "tipo": "url_imagen" if _es_url_imagen(txt) else "url",
+                    "url": txt,
+                })
             continue
 
         if txt.startswith("Pie de imagen:"):
-            add({
-                "tipo": "pie_imagen",
-                "texto": txt[len("Pie de imagen:"):].strip(),
-            })
+            if _blk_texto_activo():
+                blk.setdefault("lineas", []).append(rich_obj(txt, [{"text": txt}]))
+            else:
+                add({"tipo": "pie_imagen", "texto": txt[len("Pie de imagen:"):].strip()})
             continue
 
         if re.match(r"^Descripci[oó]n de (la )?imagen:", txt):
-            add({
-                "tipo": "desc_imagen",
-                "texto": re.sub(r"^Descripci[oó]n de (la )?imagen:\s*", "", txt),
-            })
+            if _blk_texto_activo():
+                blk.setdefault("lineas", []).append(rich_obj(txt, [{"text": txt}]))
+            else:
+                add({
+                    "tipo": "desc_imagen",
+                    "texto": re.sub(r"^Descripci[oó]n de (la )?imagen:\s*", "", txt),
+                })
             continue
 
         if style in list_styles:
             nivel = 2 if "nvl2" in style.lower() or "21" in style else 1
-            add({
-                "tipo": "p_vineta",
-                "texto": rich,
-                "nivel": nivel,
-            })
+            if _blk_texto_activo():
+                blk.setdefault("lineas", []).append(
+                    _prefix_rich(f"{VINETA_SIM[nivel]} ", _limpiar_vineta_rich(rich))
+                )
+            else:
+                add({"tipo": "p_vineta", "texto": rich, "nivel": nivel})
             continue
 
         mo = RE_OPCION.match(txt)
@@ -2224,10 +3386,12 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
             })
             continue
 
-        add({
-            "tipo": "parrafo",
-            "texto": rich,
-        })
+        if _blk_texto_activo():
+            blk.setdefault("lineas", []).append(rich)
+        elif blk and blk.get("tipo") == "actividad_complementaria" and not blk.get("_skip_solucion") and txt:
+            blk["lineas"].append(rich)
+        else:
+            add({"tipo": "parrafo", "texto": rich})
 
     flush()
 
@@ -2288,19 +3452,9 @@ def remove_empty_example_blocks(bloques: list[dict]) -> list[dict]:
         out.append(b)
         i += 1
         
-    # 2. Integrar recurso_agrupado dentro del Ejemplo/Recuerda anterior si procede
-    out2 = []
-    for b in out:
-        if b.get("tipo") == "recurso_agrupado":
-            if out2 and out2[-1].get("tipo") in {"ejemplo", "recuerda", "importante", "sabias_que", "nota", "consejo", "definicion", "hilo_conductor", "para_saber_mas", "video"}:
-                out2[-1].setdefault("lineas", []).append({
-                    "tipo": "recurso_agrupado_interno",
-                    "recurso": b
-                })
-            else:
-                out2.append(b)
-        else:
-            out2.append(b)
+    # 2. Los recursos de imagen siempre van FUERA del bloque editorial anterior,
+    #    justo después del cierre del recuadro. No se integran dentro.
+    out2 = list(out)
             
     # 3. Eliminar Ejemplos vacios
     out3 = []
@@ -2320,6 +3474,49 @@ def remove_empty_example_blocks(bloques: list[dict]) -> list[dict]:
         out3.append(b)
         
     return out3
+
+
+def tabla_xml(filas: list) -> str:
+    if not filas:
+        return ""
+    n_cols = max((len(row) for row in filas), default=1)
+    if n_cols == 0:
+        return ""
+    col_w = 4788 // n_cols  # ~8.5cm total in twips, divided equally
+    grid = "".join(f'<w:gridCol w:w="{col_w}"/>' for _ in range(n_cols))
+    rows_xml = []
+    for fila in filas:
+        cells_xml = []
+        for i in range(n_cols):
+            raw = fila[i] if i < len(fila) else ""
+            paras = raw.split("\n") if raw else [""]
+            paras_xml = "".join(
+                f'<w:p><w:pPr><w:pStyle w:val="Cuerpoparrafo"/></w:pPr>'
+                f'<w:r><w:t xml:space="preserve">{esc(ln)}</w:t></w:r></w:p>'
+                for ln in paras
+            )
+            cells_xml.append(
+                f'<w:tc>'
+                f'<w:tcPr><w:tcW w:w="{col_w}" w:type="dxa"/></w:tcPr>'
+                f'{paras_xml}</w:tc>'
+            )
+        rows_xml.append("<w:tr>" + "".join(cells_xml) + "</w:tr>")
+    return (
+        '<w:tbl>'
+        '<w:tblPr><w:tblStyle w:val="TableGrid"/>'
+        '<w:tblW w:w="0" w:type="auto"/>'
+        '<w:tblBorders>'
+        '<w:top w:val="single" w:sz="4" w:space="0" w:color="000000"/>'
+        '<w:left w:val="single" w:sz="4" w:space="0" w:color="000000"/>'
+        '<w:bottom w:val="single" w:sz="4" w:space="0" w:color="000000"/>'
+        '<w:right w:val="single" w:sz="4" w:space="0" w:color="000000"/>'
+        '<w:insideH w:val="single" w:sz="4" w:space="0" w:color="000000"/>'
+        '<w:insideV w:val="single" w:sz="4" w:space="0" w:color="000000"/>'
+        '</w:tblBorders></w:tblPr>'
+        f'<w:tblGrid>{grid}</w:tblGrid>'
+        + "".join(rows_xml)
+        + '</w:tbl>'
+    )
 
 
 def bloques_xml(bloques: list[dict]) -> list[str]:
@@ -2359,10 +3556,20 @@ def bloques_xml(bloques: list[dict]) -> list[str]:
                 out.append(p_vineta_bold(titulo))
 
         elif t == "desplegable_simple":
-            out.append(p_desp(b.get("titulo", ""), b.get("contenido", "")))
+            out.append(p_desp(b.get("titulo_rich") or b.get("titulo", ""), b.get("contenido_rich") or b.get("contenido", "")))
 
         elif t == "desplegable_simple_n2":
-            out.append(p_desp(b.get("titulo", ""), b.get("contenido", ""), 2))
+            out.append(p_desp(b.get("titulo_rich") or b.get("titulo", ""), b.get("contenido_rich") or b.get("contenido", ""), 2))
+
+        elif t == "desplegable_procedimental":
+            out.append(p_vineta_bold(b.get("titulo_rich") or b.get("titulo", "")))
+            body_r = b.get("body_rich") or b.get("body", "")
+            if body_r:
+                out.append(p_vineta(body_r, 2))
+            subitems_rich = b.get("subitems_rich", [])
+            for j, sub in enumerate(b.get("subitems", [])):
+                sub_r = subitems_rich[j] if j < len(subitems_rich) else None
+                out.append(p_vineta(sub_r if sub_r is not None else sub, 3 if body_r else 2))
 
         elif t == "recurso_agrupado":
             url_or_id = b.get("url_or_id", "")
@@ -2374,6 +3581,11 @@ def bloques_xml(bloques: list[dict]) -> list[str]:
                 out.append(add_image_label_paragraph(b["pie"], "Cuerpoparrafo"))
             if b.get("desc"):
                 out.append(add_image_label_paragraph(b["desc"], "Normal"))
+
+        elif t == "tabla":
+            filas = b.get("filas", [])
+            if filas:
+                out.append(tabla_xml(filas))
 
         elif t == "url_imagen":
             out.append(p_url_imagen(b.get("texto") or b.get("url", "")))
@@ -2396,11 +3608,14 @@ def bloques_xml(bloques: list[dict]) -> list[str]:
             "nota", "ejemplo", "sabias_que", "consejo", "definicion",
             "hilo_conductor", "para_saber_mas", "video", "importante",
         }:
-            out.append(p(b.get("etiqueta", ""), "Ejemplos-01lneainicio"))
+            out.append(p(b.get("etiqueta", ""), "Recuerda-00lneainicio"))
 
             modo_lista = False
 
             for line in b.get("lineas", []):
+                if isinstance(line, dict) and line.get("tipo") == "tabla":
+                    out.append(tabla_xml(line.get("filas", [])))
+                    continue
                 if isinstance(line, dict) and line.get("tipo") == "recurso_agrupado_interno":
                     rec = line["recurso"]
                     url_or_id = rec.get("url_or_id", "")
@@ -2452,24 +3667,27 @@ def bloques_xml(bloques: list[dict]) -> list[str]:
                 _append_links_xml(out, line)
                 modo_lista = _abre_modo_lista(line_txt)
 
-            out.append(p("", "Ejemplos-02lneafin"))
+            out.append(p("", "Recuerda-01lneafin"))
 
         elif t == "recuerda":
             out.append(p(b.get("etiqueta", "Recuerda"), "Recuerda-00lneainicio"))
 
             modo_lista_r = False
             for line in b.get("lineas", []):
+                if isinstance(line, dict) and line.get("tipo") == "tabla":
+                    out.append(tabla_xml(line.get("filas", [])))
+                    continue
                 if isinstance(line, dict) and line.get("tipo") == "recurso_agrupado_interno":
                     rec = line["recurso"]
                     url_or_id = rec.get("url_or_id", "")
                     if re.match(r"^Imagen_\d+", url_or_id, re.I):
                         out.append(add_image_label_paragraph(url_or_id, "Normal"))
                     else:
-                        out.append(p(rich_obj(url_or_id, [{"text": url_or_id, "link": url_or_id}]), "Recuerda-cuerpoparrafo"))
+                        out.append(p(rich_obj(url_or_id, [{"text": url_or_id, "link": url_or_id}]), "Recuerda-Cuerpoparrafo"))
                     if rec.get("pie"):
-                        out.append(add_image_label_paragraph(rec["pie"], "Recuerda-cuerpoparrafo"))
+                        out.append(add_image_label_paragraph(rec["pie"], "Recuerda-Cuerpoparrafo"))
                     if rec.get("desc"):
-                        out.append(add_image_label_paragraph(rec["desc"], "Normal" if re.match(r"^Imagen_\d+", url_or_id, re.I) else "Recuerda-cuerpoparrafo"))
+                        out.append(add_image_label_paragraph(rec["desc"], "Normal" if re.match(r"^Imagen_\d+", url_or_id, re.I) else "Recuerda-Cuerpoparrafo"))
                     modo_lista_r = False
                     continue
 
@@ -2490,17 +3708,20 @@ def bloques_xml(bloques: list[dict]) -> list[str]:
                     out.append(p_vineta_recuerda(line if isinstance(line, dict) else _limpiar_vineta_literal(line_txt)))
                     _append_links_xml(out, line)
                     continue
-                out.append(p(line, "Recuerda-cuerpoparrafo"))
+                out.append(p(line, "Recuerda-Cuerpoparrafo"))
                 _append_links_xml(out, line)
                 modo_lista_r = _abre_modo_lista(line_txt)
 
             out.append(p("", "Recuerda-01lneafin"))
 
         elif t == "tarea":
-            out.append(p(b.get("etiqueta", "Tarea"), "Ejemplos-01lneainicio"))
+            out.append(p(b.get("etiqueta", "Tarea"), "Recuerda-00lneainicio"))
             enunciado_start = b.get("enunciado_linea", 0)
             for i, line in enumerate(b.get("lineas", [])):
                 if i < enunciado_start:
+                    continue
+                if isinstance(line, dict) and line.get("tipo") == "tabla":
+                    out.append(tabla_xml(line.get("filas", [])))
                     continue
                 if rich_text(line).strip():
                     out.append(p(line, "EjerciciosPregunta"))
@@ -2512,13 +3733,16 @@ def bloques_xml(bloques: list[dict]) -> list[str]:
             # Regla editorial: las tareas y el resto de recursos prácticos no
             # llevan solución en el papel. La solución se reserva para
             # Aplicación práctica.
-            out.append(p("", "Ejemplos-02lneafin"))
+            out.append(p("", "Recuerda-01lneafin"))
 
 
         elif t == "aplicacion_practica":
             out.append(p(b.get("etiqueta", "Aplicación práctica"), "Recuerda-00lneainicio"))
 
             for line in b.get("lineas", []):
+                if isinstance(line, dict) and line.get("tipo") == "tabla":
+                    out.append(tabla_xml(line.get("filas", [])))
+                    continue
                 if rich_text(line).strip():
                     out.append(p(line, "EjerciciosPregunta"))
                     _append_links_xml(out, line)
@@ -2528,7 +3752,16 @@ def bloques_xml(bloques: list[dict]) -> list[str]:
 
             # Regla editorial: solo las aplicaciones prácticas llevan solución en el papel.
             for line in b.get("solucion_lineas", []):
-                if rich_text(line).strip():
+                line_txt = rich_text(line).strip()
+                if not line_txt:
+                    continue
+                # Strip "Feedback:" label — show the content directly without the prefix.
+                m_fb = re.match(r"^(?:Feedback|Retroalimentaci[oó]n)\s*:\s*", line_txt, re.I)
+                if m_fb:
+                    content = line_txt[m_fb.end():]
+                    if content:
+                        out.append(p(rich_obj(content, [{"text": content}]), "EjerciciosRespuestas"))
+                else:
                     out.append(p(line, "EjerciciosRespuestas"))
 
             for line in _solucion_feedback_a_lineas(b.get("solucion", ""), b.get("feedback", "")):
@@ -2539,7 +3772,7 @@ def bloques_xml(bloques: list[dict]) -> list[str]:
         elif t == "actividad_complementaria":
             # La numeración no va en el encabezado del recurso: se pone al inicio
             # del enunciado.
-            out.append(p("Actividad complementaria", "Ejemplos-01lneainicio"))
+            out.append(p("Actividad complementaria", "Recuerda-00lneainicio"))
 
             numero = str(b.get("numero", "")).strip()
             if not numero:
@@ -2547,6 +3780,9 @@ def bloques_xml(bloques: list[dict]) -> list[str]:
                 numero = mnum.group(1) if mnum else ""
             first = True
             for line in b.get("lineas", []):
+                if isinstance(line, dict) and line.get("tipo") == "tabla":
+                    out.append(tabla_xml(line.get("filas", [])))
+                    continue
                 if not rich_text(line).strip():
                     continue
                 line2 = _normalizar_enunciado_complementaria(line) if first else line
@@ -2559,7 +3795,7 @@ def bloques_xml(bloques: list[dict]) -> list[str]:
                 _append_links_xml(out, line2)
                 first = False
 
-            out.append(p("", "Ejemplos-02lneafin"))
+            out.append(p("", "Recuerda-01lneafin"))
 
         elif t == "url_imagen":
             out.append(p_url_imagen(b.get("url", "")))
@@ -3197,24 +4433,25 @@ def _ensure_minimal_styles(archivos: dict[str, bytes]) -> None:
     specs = {
         "TITULOUNIDAD1": ("_TITULO UNIDAD 1", "32", True),
         "TITULOUNIDAD2": ("_TITULO UNIDAD 2", "28", True),
-        "1Ttulonvl1": ("1 Título nvl1", "26", True),
-        "2Ttulonvl2": ("2 Título nvl2", "24", True),
-        "3Ttulonvl3": ("3 Título nvl3", "23", True),
+        "1Titulonv11": ("1 Título nv11", "26", True),
+        "2Titulonv12": ("2 Título nv12", "24", True),
+        "3Titulonv13": ("3 Título nv13", "23", True),
         "Cuerpoparrafo": ("Cuerpo parrafo", "22", False),
         "Vietanvl11d": ("Viñeta nvl1 1d", "22", False),
         "Vietanvl21d": ("Viñeta nvl2 1d", "22", False),
-        "Ejemplos-01lneainicio": ("Ejemplos - 01 línea inicio", "22", True),
-        "Ejemplos-Cuerpoparrafo": ("Ejemplos - Cuerpo parrafo", "22", False),
+        "Ejemplos-Cuerpoparrafo": ("Ejemplos - Cuerpo párrafo", "22", False),
         "Ejemplos-Vietanvl1": ("Ejemplos - Viñeta nvl1", "22", False),
+        "Ejemplos-Vietanvl2": ("Ejemplos - Viñeta nvl2", "22", False),
+        "Ejemplos-01lneainicio": ("Ejemplos - 01 línea inicio", "22", True),
         "Ejemplos-02lneafin": ("Ejemplos - 02 línea fin", "8", False),
         "EjerciciosPregunta": ("Ejercicios Pregunta", "22", False),
         "EjerciciosRespuestas": ("Ejercicios Respuestas", "22", False),
         "Formula": ("Formula", "22", False),
-        "Recuerda-00lneainicio": ("Recuerda - 00 línea inicio", "22", True),
-        "Recuerda-cuerpoparrafo": ("Recuerda - cuerpo parrafo", "22", False),
+        "Recuerda-00lneainicio": ("Recuerda - 00línea inicio", "22", True),
+        "Recuerda-Cuerpoparrafo": ("Recuerda - cuerpo párrafo", "22", False),
         "Recuerda-Vietanvl1": ("Recuerda - Viñeta nvl1", "22", False),
         "Recuerda-Vietanvl2": ("Recuerda - Viñeta nvl2", "22", False),
-        "Recuerda-01lneafin": ("Recuerda - 01 línea fin", "8", False),
+        "Recuerda-01lneafin": ("Recuerda - 01línea fin", "8", False),
     }
     inserts = []
     for style_id, (name, size, bold) in specs.items():
@@ -3246,7 +4483,15 @@ def generar_docx(est: dict, ejemplo: Path, plantilla: Path, salida: Path, unidad
     pars.append(p(titulo_unidad_papel, "TITULOUNIDAD1"))
     pars.append(p(est.get("titulo_modulo", ""), "TITULOUNIDAD2", negrita=True))
 
+    objetivo_general = est.get("objetivo_general", "")
     objetivos = est.get("objetivos", [])
+
+    if objetivo_general:
+        pars.append(p("El objetivo general de esta Unidad de Aprendizaje es:", "Cuerpoparrafo"))
+        pars.append(p(
+            objetivo_general if isinstance(objetivo_general, dict) else rich_obj(objetivo_general, [{"text": objetivo_general}]),
+            "Cuerpoparrafo",
+        ))
 
     if objetivos:
         obj_intro = est.get("_objectives_intro") or RUNTIME_CONFIG.get("objectives_intro", "Los objetivos específicos de esta Unidad de Aprendizaje son:")
@@ -3254,45 +4499,37 @@ def generar_docx(est: dict, ejemplo: Path, plantilla: Path, salida: Path, unidad
         for obj in objetivos:
             pars.append(p_vineta(obj, 1))
 
-    # 1. Procesar y agrupar recursos en todos los niveles, y extraer los hilos conductores a nivel principal
+    # 1. Procesar y agrupar recursos en todos los niveles
     for sec in est.get("secciones", []):
         sec["bloques"] = remove_empty_example_blocks(sec.get("bloques", []))
-        hilos_hoisted = []
 
         for sub in sec.get("subsecciones", []):
             sub["bloques"] = remove_empty_example_blocks(sub.get("bloques", []))
-            nuevos_sub = []
-            for b in sub["bloques"]:
-                if b.get("tipo") == "hilo_conductor":
-                    hilos_hoisted.append(b)
-                else:
-                    nuevos_sub.append(b)
-            sub["bloques"] = nuevos_sub
 
             for sub2 in sub.get("subsecciones", []):
                 sub2["bloques"] = remove_empty_example_blocks(sub2.get("bloques", []))
-                nuevos_sub2 = []
-                for b in sub2["bloques"]:
-                    if b.get("tipo") == "hilo_conductor":
-                        hilos_hoisted.append(b)
-                    else:
-                        nuevos_sub2.append(b)
-                sub2["bloques"] = nuevos_sub2
-                
-        # Insertar los hilos conductores extraídos al final de los bloques principales de la sección
-        sec["bloques"].extend(hilos_hoisted)
 
     # 2. Generar el XML de la estructura limpia
     for sec in est.get("secciones", []):
-        pars.append(p(f'{sec.get("num", "")}. {sec.get("titulo", "")}', "1Ttulonvl1"))
+        pars.append(p(f'{sec.get("num", "")}. {sec.get("titulo", "")}', "1Titulonv11"))
         pars.extend(bloques_xml(sec.get("bloques", [])))
 
         for sub in sec.get("subsecciones", []):
-            pars.append(p(f'{sub.get("num", "")} {sub.get("titulo", "")}', "2Ttulonvl2"))
+            sub_titulo = sub.get("titulo", "")
+            sub_num = sub.get("num", "")
+            if RE_SEC2.match(sub_titulo) or RE_SEC1.match(sub_titulo):
+                pars.append(p(sub_titulo, "2Titulonv12"))
+            else:
+                pars.append(p(f'{sub_num} {sub_titulo}'.strip(), "2Titulonv12"))
             pars.extend(bloques_xml(sub.get("bloques", [])))
 
             for sub2 in sub.get("subsecciones", []):
-                pars.append(p(f'{sub2.get("num", "")} {sub2.get("titulo", "")}', "3Ttulonvl3"))
+                sub2_titulo = sub2.get("titulo", "")
+                sub2_num = sub2.get("num", "")
+                if RE_SEC2.match(sub2_titulo) or RE_SEC1.match(sub2_titulo):
+                    pars.append(p(sub2_titulo, "2Titulonv12"))
+                else:
+                    pars.append(p(f'{sub2_num} {sub2_titulo}'.strip(), "2Titulonv12"))
                 pars.extend(bloques_xml(sub2.get("bloques", [])))
 
 
@@ -3420,6 +4657,33 @@ def buscar_interacciones_auto(unidad: Path) -> Path | None:
     return candidatos[0] if candidatos else None
 
 
+def _eliminar_primera_imagen_shutterstock(est: dict) -> None:
+    if not est.get("secciones"):
+        return
+    
+    primera_sec = est["secciones"][0]
+    # Comprobar que es la sección de portada/Introducción (antes del apartado 1)
+    if primera_sec.get("num") not in {"", None}:
+        return
+        
+    bloques = primera_sec.get("bloques", [])
+    
+    idx_borrar = -1
+    for i, b in enumerate(bloques):
+        url = str(b.get("url", "")) or rich_text(b.get("texto"))
+        if b.get("tipo") in {"url_imagen", "url"} and "shutterstock.com" in url.lower():
+            idx_borrar = i
+            break
+            
+    if idx_borrar >= 0:
+        bloques.pop(idx_borrar)
+        while idx_borrar < len(bloques):
+            if bloques[idx_borrar].get("tipo") in {"pie_imagen", "desc_imagen"}:
+                bloques.pop(idx_borrar)
+            else:
+                break
+
+
 def main():
     raw_args = sys.argv[1:]
     version = None
@@ -3512,7 +4776,9 @@ def main():
     if unidad.suffix.lower() in {".docx", ".doc"} and _es_zip(unidad):
         est = parsear_docx_fuente(unidad, interacciones)
     else:
-        est = parsear_pdf_o_texto(unidad)
+        est = parsear_pdf_o_texto(unidad, interacciones)
+
+    _eliminar_primera_imagen_shutterstock(est)
 
     print(f'  {est.get("titulo_unidad", "")} — {est.get("titulo_modulo", "")}')
     print(f'  Objetivos: {len(est.get("objetivos", []))}')
