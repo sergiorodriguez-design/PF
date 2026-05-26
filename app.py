@@ -157,6 +157,18 @@ def convertir_lote():
             log.append("Fusionando documentos…")
             docx_bytes = _fusionar_docx(rutas_salida)
 
+            # Base64 de cada unidad por separado
+            unidades_individuales = []
+            for i, u in enumerate(unidades_lista):
+                numero = u.get("numero", i + 1)
+                nombre_orig = u.get("unidad", {}).get("name", f"unidad_{numero}.docx")
+                nombre_u = safe_name(nombre_orig.rsplit(".", 1)[0] + "_papel.docx")
+                unidades_individuales.append({
+                    "numero": numero,
+                    "nombre": nombre_u,
+                    "base64": base64.b64encode(rutas_salida[i].read_bytes()).decode()
+                })
+
         nombre_salida = safe_name(nombre_salida)
         if not nombre_salida.lower().endswith(".docx"):
             nombre_salida += ".docx"
@@ -168,6 +180,7 @@ def convertir_lote():
             "nombre": nombre_salida,
             "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             "base64": base64.b64encode(docx_bytes).decode(),
+            "unidades": unidades_individuales,
             "log": log
         })
 
