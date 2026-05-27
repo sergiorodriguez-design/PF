@@ -4409,26 +4409,34 @@ def crear_docx_minimo() -> dict[str, bytes]:
 
 def _cargar_paquete_base(base: Path | None, ejemplo: Path) -> dict[str, bytes]:
     """
-    Carga el paquete base.
+    Carga el paquete base con la prioridad correcta de estilos.
 
-    Clave:
-      - Después copia TODO el paquete del ejemplo excepto word/document.xml.
-      - Así los rId de SmartArt, diagramas y dibujos siguen existiendo.
+    Orden de carga:
+      1. ejemplo  → aporta media, relaciones y su styles.xml como base
+      2. plantilla (base) → si es distinta del ejemplo, sus archivos ganan
+         (incluido styles.xml), salvo word/document.xml que siempre se genera.
+    Así un ejemplo maquetado distinto aplica sus propios estilos.
     """
     archivos: dict[str, bytes] = {}
 
-    if base and base.exists() and _es_zip(base):
-        with zipfile.ZipFile(str(base), "r") as zin:
-            archivos = {name: zin.read(name) for name in zin.namelist()}
-    else:
-        archivos = crear_docx_minimo()
-
+    # Paso 1: cargar el ejemplo como punto de partida (media, rels, estilos del ejemplo)
     if ejemplo and ejemplo.exists() and _es_zip(ejemplo):
         with zipfile.ZipFile(str(ejemplo), "r") as zej:
             for name in zej.namelist():
                 if name == "word/document.xml":
                     continue
                 archivos[name] = zej.read(name)
+    else:
+        archivos = crear_docx_minimo()
+
+    # Paso 2: si hay una plantilla separada, sus archivos tienen prioridad sobre
+    # los del ejemplo (así los estilos de la plantilla maquetada siempre ganan)
+    if base and base.exists() and _es_zip(base) and base != ejemplo:
+        with zipfile.ZipFile(str(base), "r") as zin:
+            for name in zin.namelist():
+                if name == "word/document.xml":
+                    continue
+                archivos[name] = zin.read(name)
 
     return archivos
 
