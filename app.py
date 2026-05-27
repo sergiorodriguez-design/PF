@@ -265,9 +265,10 @@ def _fusionar_docx(rutas: list) -> bytes:
             other_xml = z.read("word/document.xml").decode("utf-8")
         body += PAGE_BREAK + _body_content(other_xml)
 
+    _repl = f"<w:body>{body}{_sectpr(doc_xml)}</w:body>"
     new_doc_xml = re.sub(
         r"<w:body>[\s\S]*</w:body>",
-        f"<w:body>{body}{_sectpr(doc_xml)}</w:body>",
+        lambda _: _repl,
         doc_xml
     )
 
