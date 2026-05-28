@@ -4546,9 +4546,9 @@ def generar_docx(est: dict, ejemplo: Path, plantilla: Path, salida: Path, unidad
                 sub2_titulo = sub2.get("titulo", "")
                 sub2_num = sub2.get("num", "")
                 if RE_SEC2.match(sub2_titulo) or RE_SEC1.match(sub2_titulo):
-                    pars.append(p(sub2_titulo, "2Titulonvl2"))
+                    pars.append(p(sub2_titulo, "3Titulonvl3"))
                 else:
-                    pars.append(p(f'{sub2_num} {sub2_titulo}'.strip(), "2Titulonvl2"))
+                    pars.append(p(f'{sub2_num} {sub2_titulo}'.strip(), "3Titulonvl3"))
                 pars.extend(bloques_xml(sub2.get("bloques", [])))
 
 
