@@ -2834,7 +2834,7 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
         m2h = RE_SEC2.match(txt)
         m1h = RE_SEC1.match(txt)
 
-        if style == "Heading 1" or style == "1 Título nv11":
+        if style == "Heading 1" or style == "1 Título nvl1":
             if txt == "Introducción":
                 nueva_sec("", "Introducción")
                 continue
@@ -2850,7 +2850,7 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
                 nueva_sec("", txt)
             continue
 
-        if style == "Heading 2" or style == "2 Título nv12":
+        if style == "Heading 2" or style == "2 Título nvl2":
             if m3h and current_sub:
                 nueva_sub2(f"{current_sub.get('num', current_sec.get('num', m3h.group(1)) + '.' + m3h.group(2))}.{m3h.group(3)}", m3h.group(4))
             elif m2h:
@@ -2859,7 +2859,7 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
                 nueva_sub("", txt)
             continue
 
-        if style == "Heading 3" or style == "3 Título nv13":
+        if style == "Heading 3" or style == "3 Título nvl3":
             if m3h:
                 nueva_sub2(f"{current_sub.get('num', current_sec.get('num', m3h.group(1)) + '.' + m3h.group(2))}.{m3h.group(3)}", m3h.group(4))
             elif m2h:
@@ -4452,9 +4452,9 @@ def _ensure_minimal_styles(archivos: dict[str, bytes]) -> None:
     specs = {
         "TITULOUNIDAD1": ("_TITULO UNIDAD 1", "32", True),
         "TITULOUNIDAD2": ("_TITULO UNIDAD 2", "28", True),
-        "1Titulonv11": ("1 Título nv11", "26", True),
-        "2Titulonv12": ("2 Título nv12", "24", True),
-        "3Titulonv13": ("3 Título nv13", "23", True),
+        "1Titulonvl1": ("1 Título nvl1", "26", True),
+        "2Titulonvl2": ("2 Título nvl2", "24", True),
+        "3Titulonvl3": ("3 Título nvl3", "23", True),
         "Cuerpoparrafo": ("Cuerpo parrafo", "22", False),
         "Vietanvl11d": ("Viñeta nvl1 1d", "22", False),
         "Vietanvl21d": ("Viñeta nvl2 1d", "22", False),
@@ -4530,25 +4530,25 @@ def generar_docx(est: dict, ejemplo: Path, plantilla: Path, salida: Path, unidad
 
     # 2. Generar el XML de la estructura limpia
     for sec in est.get("secciones", []):
-        pars.append(p(f'{sec.get("num", "")}. {sec.get("titulo", "")}', "1Titulonv11"))
+        pars.append(p(f'{sec.get("num", "")}. {sec.get("titulo", "")}', "1Titulonvl1"))
         pars.extend(bloques_xml(sec.get("bloques", [])))
 
         for sub in sec.get("subsecciones", []):
             sub_titulo = sub.get("titulo", "")
             sub_num = sub.get("num", "")
             if RE_SEC2.match(sub_titulo) or RE_SEC1.match(sub_titulo):
-                pars.append(p(sub_titulo, "2Titulonv12"))
+                pars.append(p(sub_titulo, "2Titulonvl2"))
             else:
-                pars.append(p(f'{sub_num} {sub_titulo}'.strip(), "2Titulonv12"))
+                pars.append(p(f'{sub_num} {sub_titulo}'.strip(), "2Titulonvl2"))
             pars.extend(bloques_xml(sub.get("bloques", [])))
 
             for sub2 in sub.get("subsecciones", []):
                 sub2_titulo = sub2.get("titulo", "")
                 sub2_num = sub2.get("num", "")
                 if RE_SEC2.match(sub2_titulo) or RE_SEC1.match(sub2_titulo):
-                    pars.append(p(sub2_titulo, "2Titulonv12"))
+                    pars.append(p(sub2_titulo, "2Titulonvl2"))
                 else:
-                    pars.append(p(f'{sub2_num} {sub2_titulo}'.strip(), "2Titulonv12"))
+                    pars.append(p(f'{sub2_num} {sub2_titulo}'.strip(), "2Titulonvl2"))
                 pars.extend(bloques_xml(sub2.get("bloques", [])))
 
 
