@@ -672,6 +672,32 @@ def p(texto: str, estilo: str, negrita: bool = False) -> str:
     )
 
 
+_HEADING_FMT = {
+    "1Titulonvl1": ("Aileron Black",    28, 336),   # 14 pt, 16.8 pt line
+    "2Titulonvl2": ("Aileron Bold",     21, 240),   # 10.5 pt, 12 pt line
+    "3Titulonvl3": ("Aileron SemiBold", 20, 240),   # 10 pt,  12 pt line
+}
+
+
+def p_titulo(texto: str, estilo: str) -> str:
+    te = esc("" if texto is None else str(texto))
+    sp = ' xml:space="preserve"' if te and te != te.strip() else ""
+    font, sz, line = _HEADING_FMT[estilo]
+    ppr = (
+        f'<w:pPr><w:pStyle w:val="{estilo}"/>'
+        f'<w:spacing w:line="{line}" w:lineRule="exact"/></w:pPr>'
+    )
+    rpr = (
+        f'<w:rPr>'
+        f'<w:rFonts w:ascii="{font}" w:hAnsi="{font}" w:cs="{font}"/>'
+        f'<w:sz w:val="{sz}"/><w:szCs w:val="{sz}"/>'
+        f'</w:rPr>'
+    )
+    if not te:
+        return f'    <w:p>{ppr}</w:p>'
+    return f'    <w:p>{ppr}<w:r>{rpr}<w:t{sp}>{te}</w:t></w:r></w:p>'
+
+
 def p_vineta(texto: str, nivel: int = 1) -> str:
     estilo = VINETA_EST.get(nivel, VINETA_EST[1])
     simbolo = esc(VINETA_SIM.get(nivel, VINETA_SIM[1]))
@@ -2851,44 +2877,55 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
                          "4 Título nvl4", "5 Título nvl5"}
         )
 
-        # Etiquetas de bloque especial sin numeración jerárquica:
-        # aunque tengan estilo Heading en el documento de entrada, no son títulos.
+        # Etiquetas de bloque especial: aunque tengan estilo Heading, no son títulos.
         _es_bloque_sin_num = (
-            not (m4h or m3h or m2h or m1h)
-            and (txt in BLOQUES_ESP
-                 or style in special_styles
-                 or bool(RE_ACTIVITY_LABEL.match(txt)))
+            txt in BLOQUES_ESP
+            or style in special_styles
+            or bool(RE_ACTIVITY_LABEL.match(txt))
         )
 
         if _es_heading_style and not _es_bloque_sin_num:
-            # La numeración del TEXTO determina el nivel; el estilo Word es solo respaldo.
-            if m4h and current_sub:
-                nueva_sub2(
-                    f"{m4h.group(1)}.{m4h.group(2)}.{m4h.group(3)}.{m4h.group(4)}",
-                    m4h.group(5)
-                )
-            elif m3h and current_sub:
-                nueva_sub2(
-                    f"{current_sub.get('num', current_sec.get('num', m3h.group(1)) + '.' + m3h.group(2))}.{m3h.group(3)}",
-                    m3h.group(4)
-                )
-            elif m2h and current_sec:
-                nueva_sub(
-                    f"{current_sec.get('num', m2h.group(1))}.{m2h.group(2)}",
-                    m2h.group(3)
-                )
-            elif m1h:
-                nueva_sec(m1h.group(1), m1h.group(2))
+            # Nivel directo del estilo Word del documento de entrada
+            if style.startswith("Heading "):
+                try:
+                    _hlevel = int(style.split()[-1])
+                except ValueError:
+                    _hlevel = 1
+            elif style[:1].isdigit():
+                _hlevel = int(style[0])
             else:
-                # Sin numeración: nivel según estilo Word
-                if txt == "Introducción" and not current_sec:
-                    nueva_sec("", "Introducción")
-                elif style in {"Heading 3", "3 Título nvl3"} and current_sub:
-                    nueva_sub2("", txt)
-                elif style in {"Heading 2", "2 Título nvl2"} and current_sec:
-                    nueva_sub("", txt)
+                _hlevel = 1
+
+            # Número y título desde el texto (si lleva numeración explícita)
+            if m4h:
+                _num = f"{m4h.group(1)}.{m4h.group(2)}.{m4h.group(3)}.{m4h.group(4)}"
+                _tit = m4h.group(5)
+            elif m3h:
+                _num = (f"{current_sub.get('num', '')}.{m3h.group(3)}"
+                        if current_sub else m3h.group(3))
+                _tit = m3h.group(4)
+            elif m2h:
+                _num = f"{current_sec.get('num', m2h.group(1))}.{m2h.group(2)}"
+                _tit = m2h.group(3)
+            elif m1h:
+                _num, _tit = m1h.group(1), m1h.group(2)
+            else:
+                _num, _tit = "", limpiar_titulo(txt)
+
+            if _hlevel == 1:
+                nueva_sec(_num, _tit)
+            elif _hlevel == 2:
+                if current_sec:
+                    nueva_sub(_num, _tit)
                 else:
-                    nueva_sec("", txt)
+                    nueva_sec(_num, _tit)
+            else:
+                if current_sub:
+                    nueva_sub2(_num, _tit)
+                elif current_sec:
+                    nueva_sub(_num, _tit)
+                else:
+                    nueva_sec(_num, _tit)
             continue
 
         if current_sec is None and txt == "Introducción":
@@ -4565,25 +4602,25 @@ def generar_docx(est: dict, ejemplo: Path, plantilla: Path, salida: Path, unidad
 
     # 2. Generar el XML de la estructura limpia
     for sec in est.get("secciones", []):
-        pars.append(p(f'{sec.get("num", "")}. {sec.get("titulo", "")}', "1Titulonvl1"))
+        pars.append(p_titulo(f'{sec.get("num", "")}. {sec.get("titulo", "")}', "1Titulonvl1"))
         pars.extend(bloques_xml(sec.get("bloques", [])))
 
         for sub in sec.get("subsecciones", []):
             sub_titulo = sub.get("titulo", "")
             sub_num = sub.get("num", "")
             if RE_SEC2.match(sub_titulo) or RE_SEC1.match(sub_titulo):
-                pars.append(p(sub_titulo, "2Titulonvl2"))
+                pars.append(p_titulo(sub_titulo, "2Titulonvl2"))
             else:
-                pars.append(p(f'{sub_num} {sub_titulo}'.strip(), "2Titulonvl2"))
+                pars.append(p_titulo(f'{sub_num} {sub_titulo}'.strip(), "2Titulonvl2"))
             pars.extend(bloques_xml(sub.get("bloques", [])))
 
             for sub2 in sub.get("subsecciones", []):
                 sub2_titulo = sub2.get("titulo", "")
                 sub2_num = sub2.get("num", "")
                 if RE_SEC2.match(sub2_titulo) or RE_SEC1.match(sub2_titulo):
-                    pars.append(p(sub2_titulo, "3Titulonvl3"))
+                    pars.append(p_titulo(sub2_titulo, "3Titulonvl3"))
                 else:
-                    pars.append(p(f'{sub2_num} {sub2_titulo}'.strip(), "3Titulonvl3"))
+                    pars.append(p_titulo(f'{sub2_num} {sub2_titulo}'.strip(), "3Titulonvl3"))
                 pars.extend(bloques_xml(sub2.get("bloques", [])))
 
 
