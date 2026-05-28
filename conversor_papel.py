@@ -41,8 +41,9 @@ from xml.sax.saxutils import escape as xml_escape
 
 RE_URL = re.compile(r"^https?://", re.IGNORECASE)
 RE_SEC1 = re.compile(r"^(\d+)\.(?!\d)\s+(.+)")
-RE_SEC2 = re.compile(r"^(\d+)\.(\d+)\.?\s+(.+)")
-RE_SEC3 = re.compile(r"^(\d+)\.(\d+)\.(\d+)\.?\s+(.+)")
+RE_SEC2 = re.compile(r"^(\d+)\.(\d+)\.(?!\d)\s+(.+)")
+RE_SEC3 = re.compile(r"^(\d+)\.(\d+)\.(\d+)\.(?!\d)\s+(.+)")
+RE_SEC4 = re.compile(r"^(\d+)\.(\d+)\.(\d+)\.(\d+)\.?\s+(.+)")
 RE_INTER = re.compile(r"^Interacci[oó]n\s+(\d+)(?:\.?\s+(.+))?$", re.IGNORECASE)
 RE_OPCION = re.compile(r"^([a-h])[\).]\s+(.+)")
 RE_FORMULA = re.compile(
@@ -2830,44 +2831,55 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
             else:
                 continue
 
+        m4h = RE_SEC4.match(txt)
         m3h = RE_SEC3.match(txt)
         m2h = RE_SEC2.match(txt)
         m1h = RE_SEC1.match(txt)
 
-        if style == "Heading 1" or style == "1 Título nvl1":
-            if txt == "Introducción":
-                nueva_sec("", "Introducción")
-                continue
-            if m3h and current_sub:
-                nueva_sub2(f"{current_sub.get('num', current_sec.get('num', m3h.group(1)) + '.' + m3h.group(2))}.{m3h.group(3)}", m3h.group(4))
-                continue
-            if m2h and current_sec:
-                nueva_sub(f"{current_sec.get('num', m2h.group(1))}.{m2h.group(2)}", m2h.group(3))
-                continue
-            if m1h:
-                nueva_sec(m1h.group(1), m1h.group(2))
-            else:
-                nueva_sec("", txt)
-            continue
+        _es_heading_style = (
+            style.startswith("Heading")
+            or style in {"1 Título nvl1", "2 Título nvl2", "3 Título nvl3",
+                         "4 Título nvl4", "5 Título nvl5"}
+        )
 
-        if style == "Heading 2" or style == "2 Título nvl2":
-            if m3h and current_sub:
-                nueva_sub2(f"{current_sub.get('num', current_sec.get('num', m3h.group(1)) + '.' + m3h.group(2))}.{m3h.group(3)}", m3h.group(4))
-            elif m2h:
-                nueva_sub(f"{current_sec.get('num', m2h.group(1))}.{m2h.group(2)}", m2h.group(3))
-            else:
-                nueva_sub("", txt)
-            continue
+        # Etiquetas de bloque especial sin numeración jerárquica:
+        # aunque tengan estilo Heading en el documento de entrada, no son títulos.
+        _es_bloque_sin_num = (
+            not (m4h or m3h or m2h or m1h)
+            and (txt in BLOQUES_ESP
+                 or style in special_styles
+                 or bool(RE_ACTIVITY_LABEL.match(txt)))
+        )
 
-        if style == "Heading 3" or style == "3 Título nvl3":
-            if m3h:
-                nueva_sub2(f"{current_sub.get('num', current_sec.get('num', m3h.group(1)) + '.' + m3h.group(2))}.{m3h.group(3)}", m3h.group(4))
-            elif m2h:
-                nueva_sub(f"{current_sec.get('num', m2h.group(1))}.{m2h.group(2)}", m2h.group(3))
+        if _es_heading_style and not _es_bloque_sin_num:
+            # La numeración del TEXTO determina el nivel; el estilo Word es solo respaldo.
+            if m4h and current_sub:
+                nueva_sub2(
+                    f"{m4h.group(1)}.{m4h.group(2)}.{m4h.group(3)}.{m4h.group(4)}",
+                    m4h.group(5)
+                )
+            elif m3h and current_sub:
+                nueva_sub2(
+                    f"{current_sub.get('num', current_sec.get('num', m3h.group(1)) + '.' + m3h.group(2))}.{m3h.group(3)}",
+                    m3h.group(4)
+                )
+            elif m2h and current_sec:
+                nueva_sub(
+                    f"{current_sec.get('num', m2h.group(1))}.{m2h.group(2)}",
+                    m2h.group(3)
+                )
             elif m1h:
                 nueva_sec(m1h.group(1), m1h.group(2))
             else:
-                nueva_sub2("", txt)
+                # Sin numeración: nivel según estilo Word
+                if txt == "Introducción" and not current_sec:
+                    nueva_sec("", "Introducción")
+                elif style in {"Heading 3", "3 Título nvl3"} and current_sub:
+                    nueva_sub2("", txt)
+                elif style in {"Heading 2", "2 Título nvl2"} and current_sec:
+                    nueva_sub("", txt)
+                else:
+                    nueva_sec("", txt)
             continue
 
         if current_sec is None and txt == "Introducción":
@@ -2921,14 +2933,22 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
                         blk.setdefault("lineas", []).append(rich)
                 continue
 
+        m4 = RE_SEC4.match(txt)
+        if m4 and current_sub:
+            nueva_sub2(
+                f"{m4.group(1)}.{m4.group(2)}.{m4.group(3)}.{m4.group(4)}",
+                m4.group(5)
+            )
+            continue
+
         m3 = RE_SEC3.match(txt)
         if m3 and current_sec:
-            nueva_sub2(f"{current_sub.get("num", current_sec.get("num", m3.group(1)) + "." + m3.group(2))}.{m3.group(3)}", m3.group(4))
+            nueva_sub2(f"{current_sub.get('num', current_sec.get('num', m3.group(1)) + '.' + m3.group(2))}.{m3.group(3)}", m3.group(4))
             continue
 
         m2 = RE_SEC2.match(txt)
         if m2 and current_sec:
-            nueva_sub(f"{current_sec.get("num", m2.group(1))}.{m2.group(2)}", m2.group(3))
+            nueva_sub(f"{current_sec.get('num', m2.group(1))}.{m2.group(2)}", m2.group(3))
             continue
 
         m1 = RE_SEC1.match(txt)
