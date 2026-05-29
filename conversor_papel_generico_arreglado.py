@@ -4495,33 +4495,12 @@ def _ensure_minimal_styles(archivos: dict[str, bytes]) -> None:
         xml = xml_norm
         archivos[key] = xml.encode("utf-8")
 
-    # Estilos de título de apartado: siempre se reemplazan para garantizar
-    # el formato Aileron correcto, independientemente de lo que traiga la plantilla.
-    _TITULO_FMT = [
-        ("1Titulonvl1", "1 Título nvl1", "Aileron Black",    "28", "336"),
-        ("2Titulonvl2", "2 Título nvl2", "Aileron Bold",     "21", "240"),
-        ("3Titulonvl3", "3 Título nvl3", "Aileron SemiBold", "20", "240"),
-    ]
-    for sid, sname, font, sz, line in _TITULO_FMT:
-        xml = re.sub(
-            rf'<w:style\b[^>]*\bw:styleId="{re.escape(sid)}"[^>]*>[\s\S]*?</w:style>',
-            '', xml
-        )
-        xml = xml.replace("</w:styles>", (
-            f'<w:style w:type="paragraph" w:styleId="{sid}">'
-            f'<w:name w:val="{esc(sname)}"/><w:basedOn w:val="Normal"/><w:qFormat/>'
-            f'<w:pPr><w:spacing w:line="{line}" w:lineRule="exact"/></w:pPr>'
-            f'<w:rPr>'
-            f'<w:rFonts w:ascii="{font}" w:hAnsi="{font}" w:cs="{font}"/>'
-            f'<w:sz w:val="{sz}"/><w:szCs w:val="{sz}"/>'
-            f'</w:rPr>'
-            f'</w:style>'
-        ) + "</w:styles>")
-    archivos[key] = xml.encode("utf-8")
-
     specs = {
         "TITULOUNIDAD1": ("_TITULO UNIDAD 1", "32", True),
         "TITULOUNIDAD2": ("_TITULO UNIDAD 2", "28", True),
+        "1Titulonvl1": ("1 Título nvl1", "26", True),
+        "2Titulonvl2": ("2 Título nvl2", "24", True),
+        "3Titulonvl3": ("3 Título nvl3", "23", True),
         "Cuerpoparrafo": ("Cuerpo parrafo", "22", False),
         "Vietanvl11d": ("Viñeta nvl1 1d", "22", False),
         "Vietanvl21d": ("Viñeta nvl2 1d", "22", False),
