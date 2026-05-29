@@ -672,32 +672,6 @@ def p(texto: str, estilo: str, negrita: bool = False) -> str:
     )
 
 
-_HEADING_FMT = {
-    "1Titulonvl1": ("Aileron Black",    28, 336),   # 14 pt, 16.8 pt line
-    "2Titulonvl2": ("Aileron Bold",     21, 240),   # 10.5 pt, 12 pt line
-    "3Titulonvl3": ("Aileron SemiBold", 20, 240),   # 10 pt,  12 pt line
-}
-
-
-def p_titulo(texto: str, estilo: str) -> str:
-    te = esc("" if texto is None else str(texto))
-    sp = ' xml:space="preserve"' if te and te != te.strip() else ""
-    font, sz, line = _HEADING_FMT[estilo]
-    ppr = (
-        f'<w:pPr><w:pStyle w:val="{estilo}"/>'
-        f'<w:spacing w:line="{line}" w:lineRule="exact"/></w:pPr>'
-    )
-    rpr = (
-        f'<w:rPr>'
-        f'<w:rFonts w:ascii="{font}" w:hAnsi="{font}" w:cs="{font}"/>'
-        f'<w:sz w:val="{sz}"/><w:szCs w:val="{sz}"/>'
-        f'</w:rPr>'
-    )
-    if not te:
-        return f'    <w:p>{ppr}</w:p>'
-    return f'    <w:p>{ppr}<w:r>{rpr}<w:t{sp}>{te}</w:t></w:r></w:p>'
-
-
 def p_vineta(texto: str, nivel: int = 1) -> str:
     estilo = VINETA_EST.get(nivel, VINETA_EST[1])
     simbolo = esc(VINETA_SIM.get(nivel, VINETA_SIM[1]))
@@ -4521,12 +4495,33 @@ def _ensure_minimal_styles(archivos: dict[str, bytes]) -> None:
         xml = xml_norm
         archivos[key] = xml.encode("utf-8")
 
+    # Estilos de título de apartado: siempre se reemplazan para garantizar
+    # el formato Aileron correcto, independientemente de lo que traiga la plantilla.
+    _TITULO_FMT = [
+        ("1Titulonvl1", "1 Título nvl1", "Aileron Black",    "28", "336"),
+        ("2Titulonvl2", "2 Título nvl2", "Aileron Bold",     "21", "240"),
+        ("3Titulonvl3", "3 Título nvl3", "Aileron SemiBold", "20", "240"),
+    ]
+    for sid, sname, font, sz, line in _TITULO_FMT:
+        xml = re.sub(
+            rf'<w:style\b[^>]*\bw:styleId="{re.escape(sid)}"[^>]*>[\s\S]*?</w:style>',
+            '', xml
+        )
+        xml = xml.replace("</w:styles>", (
+            f'<w:style w:type="paragraph" w:styleId="{sid}">'
+            f'<w:name w:val="{esc(sname)}"/><w:basedOn w:val="Normal"/><w:qFormat/>'
+            f'<w:pPr><w:spacing w:line="{line}" w:lineRule="exact"/></w:pPr>'
+            f'<w:rPr>'
+            f'<w:rFonts w:ascii="{font}" w:hAnsi="{font}" w:cs="{font}"/>'
+            f'<w:sz w:val="{sz}"/><w:szCs w:val="{sz}"/>'
+            f'</w:rPr>'
+            f'</w:style>'
+        ) + "</w:styles>")
+    archivos[key] = xml.encode("utf-8")
+
     specs = {
         "TITULOUNIDAD1": ("_TITULO UNIDAD 1", "32", True),
         "TITULOUNIDAD2": ("_TITULO UNIDAD 2", "28", True),
-        "1Titulonvl1": ("1 Título nvl1", "26", True),
-        "2Titulonvl2": ("2 Título nvl2", "24", True),
-        "3Titulonvl3": ("3 Título nvl3", "23", True),
         "Cuerpoparrafo": ("Cuerpo parrafo", "22", False),
         "Vietanvl11d": ("Viñeta nvl1 1d", "22", False),
         "Vietanvl21d": ("Viñeta nvl2 1d", "22", False),
@@ -4602,25 +4597,25 @@ def generar_docx(est: dict, ejemplo: Path, plantilla: Path, salida: Path, unidad
 
     # 2. Generar el XML de la estructura limpia
     for sec in est.get("secciones", []):
-        pars.append(p_titulo(f'{sec.get("num", "")}. {sec.get("titulo", "")}', "1Titulonvl1"))
+        pars.append(p(f'{sec.get("num", "")}. {sec.get("titulo", "")}', "1Titulonvl1"))
         pars.extend(bloques_xml(sec.get("bloques", [])))
 
         for sub in sec.get("subsecciones", []):
             sub_titulo = sub.get("titulo", "")
             sub_num = sub.get("num", "")
             if RE_SEC2.match(sub_titulo) or RE_SEC1.match(sub_titulo):
-                pars.append(p_titulo(sub_titulo, "2Titulonvl2"))
+                pars.append(p(sub_titulo, "2Titulonvl2"))
             else:
-                pars.append(p_titulo(f'{sub_num} {sub_titulo}'.strip(), "2Titulonvl2"))
+                pars.append(p(f'{sub_num} {sub_titulo}'.strip(), "2Titulonvl2"))
             pars.extend(bloques_xml(sub.get("bloques", [])))
 
             for sub2 in sub.get("subsecciones", []):
                 sub2_titulo = sub2.get("titulo", "")
                 sub2_num = sub2.get("num", "")
                 if RE_SEC2.match(sub2_titulo) or RE_SEC1.match(sub2_titulo):
-                    pars.append(p_titulo(sub2_titulo, "3Titulonvl3"))
+                    pars.append(p(sub2_titulo, "3Titulonvl3"))
                 else:
-                    pars.append(p_titulo(f'{sub2_num} {sub2_titulo}'.strip(), "3Titulonvl3"))
+                    pars.append(p(f'{sub2_num} {sub2_titulo}'.strip(), "3Titulonvl3"))
                 pars.extend(bloques_xml(sub2.get("bloques", [])))
 
 
