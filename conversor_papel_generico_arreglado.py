@@ -256,21 +256,29 @@ def es_solo_pua(texto: str) -> bool:
 # Verbos/frases genéricas de navegación que van tras "Avanza para "
 # Detecta oraciones de transición/continuación que pertenecen al cuerpo aunque
 # el párrafo herede el estilo del bloque editorial anterior.
-_RE_TRANSICION_CUERPO = re.compile(
-    r"^(A continuaci[oó]n[,\s]|Adem[aá]s[,\s]|Por (tanto|ello|esto)[,\s]|"
-    r"En resumen[,\s]|En definitiva[,\s]|En conclusi[oó]n[,\s]|"
-    r"Como (puedes|ves|resultado)[,\s]|Te (recomendamos|sugerimos|invitamos)[,\s]|"
-    r"Para (ello|esto|finalizar|concluir)[,\s]|"
-    r"Todo esto|As[ií] (pues|mismo)[,\s])",
-    re.I,
+_PREFIJOS_TRANSICION = (
+    "a continuaci",   # cubre "A continuación" con cualquier encoding de la ó
+    "por tanto",
+    "por ello",
+    "por esto",
+    "en resumen",
+    "en definitiva",
+    "en conclusi",    # cubre "En conclusión"
+    "como resultado",
+    "así pues",
+    "asi pues",
 )
+
+def _es_inicio_transicion(txt: str) -> bool:
+    """True si el texto empieza con una frase de transición, sin importar el contexto."""
+    t = (txt or "").strip().lower()
+    return any(t.startswith(p) for p in _PREFIJOS_TRANSICION) or (txt or "").strip().endswith(":")
 
 def _es_transicion_cuerpo(txt: str, blk) -> bool:
     """True si el párrafo parece una oración de transición fuera del bloque."""
     if not blk or not blk.get("lineas"):
         return False  # bloque vacío → puede ser contenido inicial
-    t = (txt or "").strip()
-    return bool(_RE_TRANSICION_CUERPO.match(t)) or t.endswith(":")
+    return _es_inicio_transicion(txt)
 
 _RE_AVANZA_NAV = re.compile(
     r"^(continuar|ver|pasar|seguir|empezar|comenzar|acceder|avanzar|terminar|"
@@ -2387,14 +2395,56 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
                 item['link'] = link_target
             runs.append(item)
 
-        for child_el in para._p.iterchildren():
-            if child_el.tag == qn('w:r'):
-                add_run_xml(child_el)
-            elif child_el.tag == qn('w:hyperlink'):
-                rid = child_el.get(qn('r:id'))
+        # Estado para campos HYPERLINK (w:fldChar + w:instrText)
+        _fld_hyperlink_url = [None]   # URL activa del campo HYPERLINK
+        _fld_in_result    = [False]   # True entre fldCharType=separate y end
+
+        def _procesar_hijo(el):
+            tag = el.tag
+            if tag == qn('w:r'):
+                # Detectar campo HYPERLINK via w:instrText
+                instr_el = el.find('.//' + qn('w:instrText'))
+                if instr_el is not None:
+                    instr = (instr_el.text or '').strip()
+                    if instr.upper().startswith('HYPERLINK'):
+                        m = re.search(r'HYPERLINK\s+"([^"]+)"', instr, re.I)
+                        if m:
+                            _fld_hyperlink_url[0] = m.group(1)
+                    return  # instrText: no texto visible
+
+                fld_el = el.find('.//' + qn('w:fldChar'))
+                if fld_el is not None:
+                    ft = fld_el.get(qn('w:fldCharType'), '')
+                    if ft == 'separate':
+                        _fld_in_result[0] = True
+                    elif ft == 'end':
+                        _fld_hyperlink_url[0] = None
+                        _fld_in_result[0] = False
+                    return  # fldChar: no texto visible
+
+                # Run normal: usar URL del campo si estamos en la parte visible
+                link = _fld_hyperlink_url[0] if _fld_in_result[0] else None
+                add_run_xml(el, link)
+
+            elif tag == qn('w:hyperlink'):
+                rid = el.get(qn('r:id'))
                 target = relmap.get(rid, '')
-                for r_el in child_el.findall(qn('w:r')):
+                for r_el in el.findall(qn('w:r')):
                     add_run_xml(r_el, target)
+
+            elif tag in (qn('w:ins'), qn('w:del'), qn('w:moveFrom'),
+                         qn('w:moveTo')):
+                for inner in el.iterchildren():
+                    _procesar_hijo(inner)
+
+            elif tag == qn('w:sdt'):
+                sdt_content = el.find(qn('w:sdtContent'))
+                if sdt_content is not None:
+                    for inner in sdt_content.iterchildren():
+                        _procesar_hijo(inner)
+
+        for child_el in para._p.iterchildren():
+            _procesar_hijo(child_el)
 
         if not runs and para.text:
             runs = [{'text': para.text}]
@@ -3047,6 +3097,13 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
             )
             if style.startswith("Heading") or es_nueva_cabecera_especial or es_nueva_tarea:
                 flush()
+            elif (blk.get("tipo") in {"nota", "para_saber_mas", "consejo",
+                                       "importante", "sabias_que"}
+                  and _es_inicio_transicion(txt)):
+                # Oración de transición dentro de un bloque informativo (_texto) → cerrar bloque
+                flush()
+                activos().append({"tipo": "parrafo", "texto": rich})
+                continue
             else:
                 if _es_marcador_solucion(txt):
                     if _bloque_admite_solucion(blk):
@@ -3172,8 +3229,13 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
             continue
 
         if RE_URL.match(txt):
-            flush()
-            activos().append({"tipo": "url_imagen" if _es_url_imagen(txt) else "url", "url": txt})
+            if blk and blk.get("tipo") in _TIPOS_BLOQUE_INFO:
+                # URL dentro de un bloque informativo → absorber sin flushear
+                # (si se flusheara, el siguiente párrafo del bloque crearía uno nuevo vacío)
+                blk.setdefault("lineas", []).append(rich)
+            else:
+                flush()
+                activos().append({"tipo": "url_imagen" if _es_url_imagen(txt) else "url", "url": txt})
             continue
 
         if txt.startswith("Pie de imagen:"):
@@ -3191,6 +3253,15 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
                 flush()
                 activos().append({"tipo": "desc_imagen",
                                   "texto": re.sub(r"^Descripci[oó]n de (la )?imagen:\s*", "", txt)})
+            continue
+
+        # Detectar oración de transición ANTES de que cualquier handler la absorba.
+        if (blk
+                and blk.get("tipo") in {"nota", "para_saber_mas", "consejo",
+                                         "importante", "sabias_que"}
+                and _es_inicio_transicion(txt)):
+            flush()
+            activos().append({"tipo": "parrafo", "texto": rich})
             continue
 
         if style in special_styles:
@@ -3305,6 +3376,9 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
                     }
                     if txt and txt != "Importante":
                         blk["lineas"].append(rich)
+                elif _es_transicion_cuerpo(txt, blk):
+                    flush()
+                    activos().append({"tipo": "parrafo", "texto": rich})
                 elif blk and blk.get("_estilo") == style:
                     blk["lineas"].append(rich)
                 else:
@@ -3315,7 +3389,11 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
                 _tipo_label_map = {"Nota": "nota", "Consejo": "consejo", "Para saber más": "para_saber_mas"}
                 tipo_real = _tipo_label_map[style]
                 label = style
-                if txt == label or not blk or blk.get("_estilo") != style:
+                # Si el texto es una oración de transición, nunca crear ni continuar un bloque
+                if txt != label and _es_inicio_transicion(txt):
+                    flush()
+                    activos().append({"tipo": "parrafo", "texto": rich})
+                elif txt == label or not blk or blk.get("_estilo") != style:
                     flush()
                     blk = {
                         "tipo": tipo_real,
