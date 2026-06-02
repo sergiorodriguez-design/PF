@@ -3272,6 +3272,10 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
                     })
                 elif blk and blk.get("_estilo") == style:
                     blk["lineas"].append(rich)
+                else:
+                    # "Ejemplo" styled para sin bloque activo (blk fue cerrado por párrafo Normal)
+                    # → añadir como cuerpo de párrafo para no perderlo
+                    activos().append({"tipo": "parrafo", "texto": rich})
                 continue
 
             if style == "Vídeo":
@@ -3301,8 +3305,10 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
                     }
                     if txt and txt != "Importante":
                         blk["lineas"].append(rich)
-                else:
+                elif blk and blk.get("_estilo") == style:
                     blk["lineas"].append(rich)
+                else:
+                    activos().append({"tipo": "parrafo", "texto": rich})
                 continue
 
             if style in {"Nota", "Consejo", "Para saber más"}:
@@ -3464,9 +3470,7 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
             continue
 
         if blk and blk.get("_estilo") and blk.get("_estilo") != "_texto" and style not in special_styles:
-            # Los bloques informativos y prácticos absorben contenido adyacente en estilos mixtos.
-            if blk.get("tipo") not in _TIPOS_BLOQUE_INFO \
-               and blk.get("tipo") not in {"actividad_complementaria", "tarea", "aplicacion_practica"}:
+            if blk.get("tipo") not in {"actividad_complementaria", "tarea", "aplicacion_practica"}:
                 flush()
 
         def _obtener_base_bloque(t):
@@ -3594,8 +3598,6 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
             continue
 
         if _blk_texto_activo():
-            blk.setdefault("lineas", []).append(rich)
-        elif blk and blk.get("tipo") in _TIPOS_BLOQUE_INFO and txt:
             blk.setdefault("lineas", []).append(rich)
         elif blk and blk.get("tipo") == "actividad_complementaria" and not blk.get("_skip_solucion") and txt:
             blk["lineas"].append(rich)
