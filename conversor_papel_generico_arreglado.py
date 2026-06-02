@@ -254,6 +254,24 @@ def es_solo_pua(texto: str) -> bool:
 
 
 # Verbos/frases genéricas de navegación que van tras "Avanza para "
+# Detecta oraciones de transición/continuación que pertenecen al cuerpo aunque
+# el párrafo herede el estilo del bloque editorial anterior.
+_RE_TRANSICION_CUERPO = re.compile(
+    r"^(A continuaci[oó]n[,\s]|Adem[aá]s[,\s]|Por (tanto|ello|esto)[,\s]|"
+    r"En resumen[,\s]|En definitiva[,\s]|En conclusi[oó]n[,\s]|"
+    r"Como (puedes|ves|resultado)[,\s]|Te (recomendamos|sugerimos|invitamos)[,\s]|"
+    r"Para (ello|esto|finalizar|concluir)[,\s]|"
+    r"Todo esto|As[ií] (pues|mismo)[,\s])",
+    re.I,
+)
+
+def _es_transicion_cuerpo(txt: str, blk) -> bool:
+    """True si el párrafo parece una oración de transición fuera del bloque."""
+    if not blk or not blk.get("lineas"):
+        return False  # bloque vacío → puede ser contenido inicial
+    t = (txt or "").strip()
+    return bool(_RE_TRANSICION_CUERPO.match(t)) or t.endswith(":")
+
 _RE_AVANZA_NAV = re.compile(
     r"^(continuar|ver|pasar|seguir|empezar|comenzar|acceder|avanzar|terminar|"
     r"el siguiente|la siguiente|los siguientes|las siguientes|ir a|ir al)\b",
@@ -549,15 +567,10 @@ def _runs_to_xml(runs: list[dict], force_bold: bool = False) -> str:
         txt = str(r.get("text", ""))
         if not txt:
             continue
-        link = str(r.get("link", "")).strip()
-        # Texto ancla de hipervínculo externo: se omite aquí porque la URL
-        # aparecerá como párrafo aparte vía _append_links_xml.
-        if link and RE_URL.match(link) and txt.strip() != link:
-            continue
         te = esc(txt)
         sp = ' xml:space="preserve"' if te and te != te.strip() else ""
         props = []
-        if link:
+        if r.get("link"):
             props.append('<w:rStyle w:val="Hyperlink"/>')
         if force_bold or r.get("bold"):
             props.append("<w:b/><w:bCs/>")
@@ -568,8 +581,8 @@ def _runs_to_xml(runs: list[dict], force_bold: bool = False) -> str:
             props.append(f'<w:color w:val="{color.upper()}"/>')
         rpr = f"<w:rPr>{''.join(props)}</w:rPr>" if props else ""
         run_xml = f"<w:r>{rpr}<w:t{sp}>{te}</w:t></w:r>"
-        if link:
-            rid = _rid_hyperlink(link)
+        if r.get("link"):
+            rid = _rid_hyperlink(str(r.get("link")))
             if rid:
                 run_xml = f'<w:hyperlink r:id="{rid}" w:history="1">{run_xml}</w:hyperlink>'
         partes.append(run_xml)
@@ -849,8 +862,14 @@ def _links_from_rich(obj) -> list[str]:
     if not isinstance(obj, dict):
         return []
     links = []
+    # Campo links explícito
     for link in obj.get("links", []) or []:
         link = str(link).strip()
+        if link and RE_URL.match(link) and link not in links:
+            links.append(link)
+    # Fallback: extraer de los runs directamente (se pierde cuando se crea rich_obj nuevo)
+    for r in obj.get("runs", []) or []:
+        link = str(r.get("link", "")).strip()
         if link and RE_URL.match(link) and link not in links:
             links.append(link)
     return links
@@ -1192,12 +1211,60 @@ def parsear_interacciones(path: Path | None) -> dict[int, dict]:
     from docx import Document
     from docx.oxml.ns import qn as _qn
 
+    def _run_es_titulo_desplegable(r_el) -> bool:
+        """True si el run tiene fondo/highlight que indica que es un título de desplegable."""
+        try:
+            rpr = r_el.find(_qn("w:rPr"))
+            if rpr is None:
+                return False
+            if rpr.find(_qn("w:highlight")) is not None:
+                return True
+            shd = rpr.find(_qn("w:shd"))
+            if shd is not None:
+                fill = shd.get(_qn("w:fill"), "auto").lower()
+                if fill not in {"auto", "ffffff", "000000", "none", ""}:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _split_para_highlight(para) -> list[str]:
+        """
+        Si el párrafo mezcla runs con fondo (título) y sin fondo (cuerpo),
+        devuelve dos cadenas: [titulo, cuerpo]. Si no hay mezcla, devuelve [].
+        """
+        try:
+            runs_info = []
+            for r_el in para._p.findall(".//" + _qn("w:r")):
+                texts = [t.text or "" for t in r_el.findall(".//" + _qn("w:t"))]
+                text = "".join(texts)
+                if not text:
+                    continue
+                runs_info.append((text, _run_es_titulo_desplegable(r_el)))
+            if not runs_info:
+                return []
+            has_bg  = any(bg for _, bg in runs_info)
+            has_nbg = any(not bg for _, bg in runs_info)
+            if not (has_bg and has_nbg):
+                return []  # homogéneo → no dividir
+            titulo = "".join(t for t, bg in runs_info if bg)
+            cuerpo = "".join(t for t, bg in runs_info if not bg)
+            titulo = _norm_line(titulo)
+            cuerpo = _norm_line(cuerpo)
+            if titulo and cuerpo:
+                return [titulo, cuerpo]
+        except Exception:
+            pass
+        return []
+
     def _cell_lineas(cell) -> list[str]:
         """
         Extrae las líneas de una celda párrafo a párrafo.
         Cuando un párrafo tiene numeración automática (w:numPr) asigna el
         prefijo de letra correspondiente (a., b., …) para no perder ese dato
         al leer solo cell.text.
+        Cuando un párrafo mezcla runs con fondo destacado (título de desplegable)
+        y runs normales (cuerpo), los divide en dos líneas.
         """
         letras_seq = "abcdefghijklmnopqrstuvwxyz"
         letra_idx: dict[str, int] = {}  # numId_ilvl → contador
@@ -1206,6 +1273,13 @@ def parsear_interacciones(path: Path | None) -> dict[int, dict]:
             txt = _norm_line(para.text)
             if not txt:
                 continue
+
+            # Detectar párrafos que mezclan título destacado + cuerpo (desplegables)
+            split = _split_para_highlight(para)
+            if split:
+                lines.extend(split)
+                continue
+
             # Detectar numeración automática
             try:
                 pPr = para._p.find(_qn("w:pPr"))
@@ -2357,6 +2431,7 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
     sub2_count = 0
     en_objetivos = False
     ignorar_hasta_contenido = False
+    _saltando_ce = False  # True mientras se omite el bloque "Criterios de evaluación"
     blk = None
 
     def activos() -> list:
@@ -2729,10 +2804,14 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
         # Prepend auto-number prefix (a), b), 1., etc.) when the paragraph uses numPr
         # and the actual number character is NOT in the paragraph's <w:t> content.
         _np = _numpr_prefix(child)
+        _tiene_numpr = bool(_np)  # True si el número viene de numeración automática Word
         if _np and txt and not txt.startswith(_np.strip()):
             txt = _np + txt
             runs = [{"text": _np}] + list(rich_runs(rich))
+            _saved_links = rich.get("links") if isinstance(rich, dict) else None
             rich = rich_obj(txt, runs)
+            if _saved_links:
+                rich["links"] = _saved_links
 
         if es_solo_pua(txt):
             continue
@@ -2758,9 +2837,10 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
                 est["_objectives_intro"] = nueva_intro
             continue
 
-        if _es_cabecera_no_contenido(txt) and not current_sec:
+        if _es_cabecera_no_contenido(txt):
             en_objetivos = False
             ignorar_hasta_contenido = True
+            _saltando_ce = True
             continue
 
         if blk and blk.get("_estilo") in {"Aplicación práctica", "_texto"} and (txt == "Enunciado" or txt.startswith("Enunciado:")):
@@ -2858,6 +2938,16 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
                 ignorar_hasta_contenido = False
             else:
                 continue
+
+        # Omitir contenido del bloque "Criterios de evaluación" (sea cual sea la posición)
+        if _saltando_ce:
+            es_heading_real = style.startswith("Heading") and not _es_cabecera_no_contenido(txt)
+            if es_heading_real or RE_SEC1.match(txt) or txt == "Introducción":
+                _saltando_ce = False  # nuevo heading real → dejar de saltar
+                ignorar_hasta_contenido = False
+                # seguir procesando este párrafo normalmente
+            else:
+                continue  # saltar contenido CE
 
         m4h = RE_SEC4.match(txt)
         m3h = RE_SEC3.match(txt)
@@ -3006,9 +3096,17 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
 
         m1 = RE_SEC1.match(txt)
         if m1 and len(m1.group(2)) < 120:
-            # Si hay un bloque informativo activo, el item numerado es contenido, no sección
-            if blk and blk.get("tipo") in _TIPOS_BLOQUE_INFO:
-                blk.setdefault("lineas", []).append(rich)
+            _es_item_lista = (
+                _tiene_numpr                          # numeración automática Word
+                or (current_sec and activos())        # dentro de contenido ya existente → viñeta
+            )
+            if _es_item_lista:
+                if blk and blk.get("tipo") in _TIPOS_BLOQUE_INFO:
+                    blk.setdefault("lineas", []).append(rich)
+                elif blk and blk.get("tipo") in {"actividad_complementaria", "tarea", "aplicacion_practica"}:
+                    blk.setdefault("lineas", []).append(rich)
+                elif current_sec:
+                    activos().append({"tipo": "p_vineta", "texto": rich, "nivel": 1})
             else:
                 nueva_sec("", m1.group(2))
             continue
@@ -3079,14 +3177,20 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
             continue
 
         if txt.startswith("Pie de imagen:"):
-            flush()
-            activos().append({"tipo": "pie_imagen", "texto": txt[len("Pie de imagen:"):].strip()})
+            if blk and blk.get("tipo") in _TIPOS_BLOQUE_INFO:
+                blk.setdefault("lineas", []).append(rich)  # dentro del bloque
+            else:
+                flush()
+                activos().append({"tipo": "pie_imagen", "texto": txt[len("Pie de imagen:"):].strip()})
             continue
 
         if re.match(r"^Descripci[oó]n de (la )?imagen:", txt, re.I):
-            flush()
-            activos().append({"tipo": "desc_imagen",
-                              "texto": re.sub(r"^Descripci[oó]n de (la )?imagen:\s*", "", txt)})
+            if blk and blk.get("tipo") in _TIPOS_BLOQUE_INFO:
+                blk.setdefault("lineas", []).append(rich)  # dentro del bloque
+            else:
+                flush()
+                activos().append({"tipo": "desc_imagen",
+                                  "texto": re.sub(r"^Descripci[oó]n de (la )?imagen:\s*", "", txt)})
             continue
 
         if style in special_styles:
@@ -3360,8 +3464,9 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
             continue
 
         if blk and blk.get("_estilo") and blk.get("_estilo") != "_texto" and style not in special_styles:
-            # Los bloques informativos absorben su contenido; solo se flushean ante headings o nuevos bloques
-            if blk.get("tipo") not in _TIPOS_BLOQUE_INFO:
+            # Los bloques informativos y prácticos absorben contenido adyacente en estilos mixtos.
+            if blk.get("tipo") not in _TIPOS_BLOQUE_INFO \
+               and blk.get("tipo") not in {"actividad_complementaria", "tarea", "aplicacion_practica"}:
                 flush()
 
         def _obtener_base_bloque(t):
@@ -3761,8 +3866,12 @@ def bloques_xml(bloques: list[dict]) -> list[str]:
                     out.append(add_image_label_paragraph(line_txt, "Normal"))
                     continue
 
+                if re.match(r"^Pie de imagen:", line_txt, re.I):
+                    out.append(add_image_label_paragraph(line_txt, "Ejemplos-Cuerpoparrafo"))
+                    continue
+
                 if re.match(r"^Descripci[oó]n de (la )?imagen:", line_txt, re.I):
-                    out.append(add_image_label_paragraph(line_txt, "Normal"))
+                    out.append(add_image_label_paragraph(line_txt, "Ejemplos-Cuerpoparrafo"))
                     continue
 
                 # En recursos tipo Vídeo el online puede traer un botón con texto
@@ -3816,8 +3925,12 @@ def bloques_xml(bloques: list[dict]) -> list[str]:
                 if re.match(r"^Imagen_\d+", line_txt, re.I):
                     out.append(add_image_label_paragraph(line_txt, "Normal"))
                     continue
+                if re.match(r"^Pie de imagen:", line_txt, re.I):
+                    out.append(add_image_label_paragraph(line_txt, "Recuerda-Cuerpoparrafo"))
+                    continue
+
                 if re.match(r"^Descripci[oó]n de (la )?imagen:", line_txt, re.I):
-                    out.append(add_image_label_paragraph(line_txt, "Normal"))
+                    out.append(add_image_label_paragraph(line_txt, "Recuerda-Cuerpoparrafo"))
                     continue
                 if _parece_item_lista_en_bloque(line_txt, modo_lista_r):
                     out.append(p_vineta_recuerda(line if isinstance(line, dict) else _limpiar_vineta_literal(line_txt)))
