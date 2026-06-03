@@ -905,6 +905,56 @@ def _replace_text_preserve_first_style(obj, nuevo: str) -> dict:
     return out
 
 
+def _normalizar_instrucciones_inline(texto: str) -> str:
+    """Transforma frases de instrucción online que aparecen en medio de párrafos.
+    'en esta actividad deberás reflexionar' → 'reflexiona'
+    'Después, deberás investigar y analizar:' → 'Después, investiga y analiza.'
+    """
+    if not texto:
+        return texto
+
+    # "en esta actividad deberás VERB[ar]" → "VERB_imperativo"
+    def _repl_en_esta(m):
+        verbo = m.group(1).strip()
+        return infinitivo_a_imperativo(verbo + " ").rstrip()
+
+    texto = re.sub(
+        r'[Ee]n esta actividad\s*[,]?\s+deberás\s+(\w+[aei]r)\b',
+        _repl_en_esta, texto, flags=re.I
+    )
+
+    # "deberás VERB1[ar] y VERB2[ar]" → "IMP1 y IMP2"
+    def _repl_deberas_doble(m):
+        i1 = infinitivo_a_imperativo(m.group(1) + " ").rstrip()
+        i2 = infinitivo_a_imperativo(m.group(2) + " ").rstrip()
+        return f"{i1} y {i2}"
+
+    texto = re.sub(
+        r'[Dd]eberás\s+(\w+[aei]r)\s+y\s+(\w+[aei]r)',
+        _repl_deberas_doble, texto, flags=re.I
+    )
+
+    # "deberás VERB[ar]" → "IMP"
+    def _repl_deberas(m):
+        return infinitivo_a_imperativo(m.group(1) + " ").rstrip()
+
+    texto = re.sub(
+        r'[Dd]eberás\s+(\w+[aei]r)\b',
+        _repl_deberas, texto, flags=re.I
+    )
+
+    # "explorarás", "reflexionarás", etc. en futuro → imperativo
+    def _repl_futuro_inline(m):
+        return _futuro_a_imperativo(m.group(0))
+
+    texto = re.sub(r'\b\w+[aei]rás\b', _repl_futuro_inline, texto, flags=re.I)
+
+    # Eliminar "en esta actividad," / "en esta actividad " al inicio de frase
+    texto = re.sub(r'\ben esta actividad[,]?\s+', '', texto, flags=re.I)
+
+    return texto
+
+
 def _normalizar_enunciado_complementaria(obj) -> dict:
     """Convierte redacciones online a enunciado papel.
     'En esta actividad deberás pensar...' → 'Piensa...'
@@ -4094,6 +4144,11 @@ def bloques_xml(bloques: list[dict]) -> list[str]:
                 if not rich_text(line).strip():
                     continue
                 line2 = _normalizar_enunciado_complementaria(line) if first else line
+                # Aplicar transformaciones inline a todas las líneas
+                _txt2 = rich_text(line2).strip()
+                _txt_norm = _normalizar_instrucciones_inline(_txt2)
+                if _txt_norm != _txt2:
+                    line2 = _replace_text_preserve_first_style(line2, _txt_norm)
                 if not rich_text(line2).strip():
                     first = False
                     continue
