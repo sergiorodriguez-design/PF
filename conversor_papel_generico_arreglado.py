@@ -287,14 +287,17 @@ def _es_transicion_cuerpo(txt: str, blk) -> bool:
 # Frases de colaboración colectiva que no aplican al formato papel
 _RE_FRASE_COLABORATIVA = re.compile(
     r"(con los dem[aá]s participantes|"
+    r"con el resto de los participantes|"
     r"entre todos.*elaborad|elaborad.*conjunta|"
+    r"entre todos.*respuesta|respuesta m[aá]s enriquecida|"
     r"public[aá]lo en el foro|en el foro.*coment|"
     r"debatid.*grupo|compartid.*grupo|"
     r"una respuesta conjunta|una propuesta conjunta|"
     r"\ben el foro\b|"
     r"con tu grupo de trabajo|con tu compa[ñn]ero|"
     r"con el resto del grupo|con los dem[aá]s del grupo|"
-    r"trabaja con tu grupo|comparte con el grupo)",
+    r"trabaja con tu grupo|comparte con el grupo|"
+    r"P[ou]dr[aá]s compartir|P[ou]dr[aá]s debatir)",
     re.I | re.S
 )
 
@@ -823,7 +826,7 @@ def p_desp(titulo, desc, nivel: int = 1) -> str:
             last = dict(t_runs[-1])
             last["text"] = last.get("text", "").rstrip(".: ")
             t_runs = list(t_runs[:-1]) + [last]
-        titulo_block = _runs_to_xml(t_runs) + f'<w:r><w:rPr><w:b/><w:bCs/></w:rPr><w:t xml:space="preserve">: </w:t></w:r>'
+        titulo_block = _runs_to_xml(t_runs, force_bold=True) + f'<w:r><w:rPr><w:b/><w:bCs/></w:rPr><w:t xml:space="preserve">: </w:t></w:r>'
     else:
         titulo_str = str(titulo).rstrip(".: ")
         titulo_plain = titulo_str
@@ -1121,7 +1124,7 @@ def p_desc_imagen(texto: str) -> str:
     texto = texto.strip()
     if not re.match(r"^Descripci[oó]n de (la )?imagen:", texto, re.I):
         texto = "Descripción de la imagen: " + texto
-    return add_image_label_paragraph(texto, "Normal")
+    return add_image_label_paragraph(texto, "Cuerpoparrafo")
 
 
 
@@ -2484,7 +2487,11 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
                 item['bold'] = True
             if italic_r:
                 item['italic'] = True
-            if color_val and color_val.lower() not in {'auto', '000000'}:
+            # Preservar color pero filtrar rojos que corresponden a marcadores CE del online
+            _CE_COLORS = {'ff0000', 'c00000', 'cc0000', 'ff6600', 'ff4500',
+                          'ed7d31', 'e26b0a', 'c55a11', 'be4b48', 'c0392b'}
+            if color_val and color_val.lower() not in {'auto', '000000'} and \
+               color_val.lower() not in _CE_COLORS:
                 item['color'] = color_val
             if link_target:
                 item['link'] = link_target
@@ -3000,9 +3007,11 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
             continue
 
         if debe_elim(txt):
-            # Inside an open "Actividad colaborativa" block, preserve all content
+            # Inside an open "Actividad colaborativa" block, preserve most content
             # so the full activity description is transferred to paper format.
-            if not (blk is not None and blk.get("_estilo") == "Actividad colaborativa"):
+            # Exception: frases colaborativas (Podrás compartir...) se eliminan siempre.
+            _en_colabo = blk is not None and blk.get("_estilo") == "Actividad colaborativa"
+            if not _en_colabo or _es_frase_colaborativa(txt):
                 continue
 
         if blk and blk.get("tipo") == "_ejercicio_pendiente":
@@ -4969,11 +4978,8 @@ def generar_docx(est: dict, ejemplo: Path, plantilla: Path, salida: Path, unidad
                 _s3 = sub2.get("style_out", "3Titulonvl3")
                 if not sub2_titulo:
                     pass
-                elif RE_SEC2.match(sub2_titulo) or RE_SEC1.match(sub2_titulo):
-                    pars.append(p(sub2_titulo, _s3))
-                elif sub2_num:
-                    pars.append(p(f'{sub2_num}. {sub2_titulo}', _s3))
                 else:
+                    # Nivel 3: sin numeración
                     pars.append(p(sub2_titulo, _s3))
                 pars.extend(bloques_xml(sub2.get("bloques", [])))
 
