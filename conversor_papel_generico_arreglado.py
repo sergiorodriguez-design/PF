@@ -86,6 +86,10 @@ PREFIJOS_ELIM = (
     "Las instrucciones para realizar la tarea",
     "Podrás compartir ",
     "Podrás debatir",
+    "Comenta tu reflexión con los demás",
+    "Comenta tu actividad con los demás",
+    "Comparte tu reflexión con los demás",
+    "Comparte tu actividad con los demás",
     "poder debatir y aportar",
     "Podrás identificar las",
     "Es el momento de realizar la siguiente",
@@ -280,6 +284,24 @@ def _es_transicion_cuerpo(txt: str, blk) -> bool:
         return False  # bloque vacío → puede ser contenido inicial
     return _es_inicio_transicion(txt)
 
+# Frases de colaboración colectiva que no aplican al formato papel
+_RE_FRASE_COLABORATIVA = re.compile(
+    r"(con los dem[aá]s participantes|"
+    r"entre todos.*elaborad|elaborad.*conjunta|"
+    r"public[aá]lo en el foro|en el foro.*coment|"
+    r"debatid.*grupo|compartid.*grupo|"
+    r"una respuesta conjunta|una propuesta conjunta|"
+    r"\ben el foro\b|"
+    r"con tu grupo de trabajo|con tu compa[ñn]ero|"
+    r"con el resto del grupo|con los dem[aá]s del grupo|"
+    r"trabaja con tu grupo|comparte con el grupo)",
+    re.I | re.S
+)
+
+def _es_frase_colaborativa(txt: str) -> bool:
+    """True si la frase es de coordinación colectiva (no aplicable al papel)."""
+    return bool(_RE_FRASE_COLABORATIVA.search(txt or ""))
+
 _RE_AVANZA_NAV = re.compile(
     r"^(continuar|ver|pasar|seguir|empezar|comenzar|acceder|avanzar|terminar|"
     r"el siguiente|la siguiente|los siguientes|las siguientes|ir a|ir al)\b",
@@ -371,7 +393,7 @@ def infinitivo_a_imperativo(texto: str) -> str:
         ("completar ", "Completa "), ("redactar ", "Redacta "),
         ("investigar ", "Investiga "), ("seleccionar ", "Selecciona "),
         ("clasificar ", "Clasifica "), ("calcular ", "Calcula "),
-        ("consultar ", "Consulta "), ("revisar ", "Revisa "),
+        ("consultar ", "Consulta "), ("revisar ", "Revisa "), ("leer ", "Lee "),
         ("explorar ", "Explora "), ("reflexionar ", "Reflexiona "),
         ("compartir ", "Comparte "), ("debatir ", "Debate "),
         ("aplicar ", "Aplica "), ("desarrollar ", "Desarrolla "),
@@ -943,6 +965,12 @@ def _normalizar_instrucciones_inline(texto: str) -> str:
         _repl_deberas, texto, flags=re.I
     )
 
+    # "vas a VERB[ar]" → imperativo
+    def _repl_vas_a(m):
+        return infinitivo_a_imperativo(m.group(1) + " ").rstrip() + " "
+
+    texto = re.sub(r'\bvas a\s+(\w+[aei]r)\b', _repl_vas_a, texto, flags=re.I)
+
     # "explorarás", "reflexionarás", etc. en futuro → imperativo
     def _repl_futuro_inline(m):
         return _futuro_a_imperativo(m.group(0))
@@ -979,7 +1007,16 @@ def _normalizar_enunciado_complementaria(obj) -> dict:
             nuevo = infinitivo_a_imperativo(nuevo2.strip())
             break
 
-    # 2. "En esta actividad VERB_FUTURO(rás) ..." → imperativo
+    # 2a. "En esta actividad vas a VERB[ar]" → imperativo
+    if nuevo == texto:
+        m_va = re.match(r"^En esta actividad[,]?\s+vas a\s+(\w+[aei]r)\b\s*(.*)", nuevo, re.I | re.S)
+        if m_va:
+            verbo = m_va.group(1)
+            resto = m_va.group(2).strip()
+            imp = infinitivo_a_imperativo(verbo + " ").rstrip()
+            nuevo = (imp + " " + resto).strip() if resto else imp
+
+    # 2b. "En esta actividad VERB_FUTURO(rás) ..." → imperativo
     if nuevo == texto:
         m_fut = re.match(r"^En esta actividad[,]?\s+(\w+rás)[,]?\s*(.*)", nuevo, re.I | re.S)
         if m_fut:
@@ -3039,15 +3076,15 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
             else:
                 continue
 
-        # Omitir contenido del bloque "Criterios de evaluación" (sea cual sea la posición)
+        # Omitir TODO el bloque "Criterios de evaluación" (incluidos sub-headings internos
+        # como "Criterios cumplidos"). Solo parar ante la Introducción o un título numerado.
         if _saltando_ce:
-            es_heading_real = style.startswith("Heading") and not _es_cabecera_no_contenido(txt)
-            if es_heading_real or RE_SEC1.match(txt) or txt == "Introducción":
-                _saltando_ce = False  # nuevo heading real → dejar de saltar
+            if RE_SEC1.match(txt) or txt == "Introducción":
+                _saltando_ce = False
                 ignorar_hasta_contenido = False
                 # seguir procesando este párrafo normalmente
             else:
-                continue  # saltar contenido CE
+                continue  # saltar CE, "Criterios cumplidos", items CE, etc.
 
         m4h = RE_SEC4.match(txt)
         m3h = RE_SEC3.match(txt)
@@ -3098,7 +3135,9 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
             elif m1h:
                 _tit = m1h.group(2)
             else:
-                _tit = limpiar_titulo(txt)
+                # Intentar quitar prefijo numérico sin punto final (e.g. "1.1 Título", "2.3 Título")
+                _txt_sin_num = re.sub(r"^(\d+\.)*\d+\s+", "", txt).strip()
+                _tit = limpiar_titulo(_txt_sin_num if _txt_sin_num and _txt_sin_num != txt else txt)
 
             if _hlevel >= 3:
                 if current_sub:
@@ -3486,7 +3525,9 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
                     continue
 
                 if txt and not re.match(r"^Actividad\s+colaborativa\b", txt, re.I):
-                    blk["lineas"].append(rich)
+                    # Eliminar frases de colaboración colectiva (no aplican al papel)
+                    if not _es_frase_colaborativa(txt):
+                        blk["lineas"].append(rich)
                 continue
 
             if style == "Aplicación práctica":
@@ -4150,6 +4191,10 @@ def bloques_xml(bloques: list[dict]) -> list[str]:
                 if _txt_norm != _txt2:
                     line2 = _replace_text_preserve_first_style(line2, _txt_norm)
                 if not rich_text(line2).strip():
+                    first = False
+                    continue
+                # Eliminar frases de colaboración colectiva en el renderizado
+                if _es_frase_colaborativa(rich_text(line2)):
                     first = False
                     continue
                 if first and numero:
