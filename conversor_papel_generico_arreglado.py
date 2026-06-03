@@ -320,6 +320,9 @@ def debe_elim(texto: str) -> bool:
     if texto.startswith("Avanza para "):
         resto = texto[len("Avanza para "):]
         return bool(_RE_AVANZA_NAV.match(resto))
+    # Items de criterios de evaluación (CE): "[letra]) Se han ..." o "Se han ..."
+    if re.match(r"^[a-h]\)\s+Se han\b", texto, re.I):
+        return True
     return any(texto.startswith(p) for p in PREFIJOS_ELIM)
 
 
@@ -376,12 +379,17 @@ def _tipo_objetivos_intro(texto: str) -> str:
 
 
 def _es_cabecera_no_contenido(texto: str) -> bool:
-    t = _norm_line(texto).lower().strip(':')
-    return t in {
-        "resultado de aprendizaje", "resultados de aprendizaje",
-        "criterios de evaluación", "criterios de evaluacion",
-        "ce", "ra",
-    }
+    t = _norm_line(texto).lower().strip(':').strip()
+    # Usar startswith para evitar problemas con encoding NFC/NFD de la "ó"
+    return (
+        t in {"ce", "ra"}
+        or t.startswith("criterios de evaluaci")    # cubre evaluación/evaluacion/NFD
+        or t.startswith("criterios cumplidos")      # subsección CE directa
+        or t.startswith("criterios no cumplidos")   # variante
+        or t.startswith("resultado de aprendizaje")
+        or t.startswith("resultados de aprendizaje")
+        or bool(re.match(r"^ra\s*\d+", t))          # RA1, RA 2, etc.
+    )
 
 def infinitivo_a_imperativo(texto: str) -> str:
     pares = [
