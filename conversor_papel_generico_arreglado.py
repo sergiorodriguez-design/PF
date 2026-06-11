@@ -2911,9 +2911,96 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
                 and blk.get("_estilo") == "_texto"
                 and blk.get("tipo") in _TIPOS_BLOQUE_INFO)
 
+    _RE_ETIQUETA_TAREA = re.compile(
+        r"^(?:Tarea\s+de\s+evaluaci[oó]n|Actividad\s+de\s+evaluaci[oó]n|"
+        r"Aplicaci[oó]n\s+pr[aá]ctica|Caso\s+pr[aá]ctico|Ejercicio|Tarea)\b",
+        re.I,
+    )
+
+    def _tarea_desde_tabla(tbl):
+        """Si la tabla es una caja de tarea (1 celda cuyo contenido empieza por
+        "Tarea de evaluación N…"), devuelve un bloque "tarea" con etiqueta limpia
+        ("Tarea N") y el enunciado/requisitos. Si no, devuelve None.
+
+        Las tareas suelen venir maquetadas como un recuadro (tabla de una celda),
+        por lo que el detector de párrafos nunca las veía."""
+        rows = tbl.rows
+        if len(rows) != 1:
+            return None
+        celdas = rows[0].cells
+        if not celdas:
+            return None
+        cell = celdas[0]
+        # La caja de tarea es de una sola celda real.
+        if len({id(c._tc) for c in celdas}) != 1:
+            return None
+        primer = ""
+        for p in cell.paragraphs:
+            primer = _norm_line(p.text)
+            if primer:
+                break
+        if not _RE_ETIQUETA_TAREA.match(primer):
+            return None
+
+        m_num = re.search(r"\d+", primer)
+        etiqueta = f"Tarea {m_num.group(0)}" if m_num else "Tarea"
+
+        lineas: list = []
+        visto_label = False
+        skip_obj = False
+        for el in cell._tc.iterchildren():
+            if el.tag == qn("w:p"):
+                pp = DParagraph(el, doc)
+                t = _norm_line(pp.text)
+                if not t:
+                    continue
+                if not visto_label and _RE_ETIQUETA_TAREA.match(t):
+                    visto_label = True
+                    continue
+                if t.startswith("Duración:"):
+                    continue
+                if t.startswith(("Objetivo:", "Objetivos:")):
+                    skip_obj = True
+                    continue
+                if t == "Enunciado" or t.startswith("Enunciado:"):
+                    skip_obj = False
+                    contenido = t[len("Enunciado:"):].strip() if t.startswith("Enunciado:") else ""
+                    if contenido:
+                        lineas.append(rich_obj(contenido, [{"text": contenido}]))
+                    continue
+                if skip_obj:
+                    continue
+                lineas.append(_rich_para(pp))
+            elif el.tag == qn("w:tbl"):
+                sub = DTable(el, doc)
+                subfilas = []
+                for r in sub.rows:
+                    rf = []
+                    seen = set()
+                    for c in r.cells:
+                        cid = id(c._tc)
+                        if cid in seen:
+                            continue
+                        seen.add(cid)
+                        cl = [_norm_line(x.text) for x in c.paragraphs if _norm_line(x.text)]
+                        rf.append("\n".join(cl))
+                    subfilas.append(rf)
+                if any(any(c for c in r) for r in subfilas):
+                    lineas.append({"tipo": "tabla", "filas": subfilas})
+
+        return {"tipo": "tarea", "etiqueta": etiqueta, "lineas": lineas, "enunciado_linea": 0}
+
     for child in _aplanar_elementos(doc.element.body):
         if child.tag == qn("w:tbl"):
             tbl = DTable(child, doc)
+            # Caja de tarea maquetada como tabla de una celda → bloque "tarea".
+            _tarea_blk = _tarea_desde_tabla(tbl)
+            if _tarea_blk is not None:
+                if not current_sec:
+                    nueva_sec("", "Introducción")
+                flush()
+                activos().append(_tarea_blk)
+                continue
             filas = []
             for row in tbl.rows:
                 fila = []
@@ -3192,15 +3279,16 @@ def parsear_docx_fuente(docx_path: Path, interacciones: dict[int, dict]) -> dict
                 and style != blk.get("_estilo")
                 and _es_inicio_bloque_cualquiera(txt, style)
             )
-            # Nueva etiqueta de tarea/actividad dentro del mismo estilo → nuevo bloque
-            es_nueva_tarea = (
-                style in {"Aplicación práctica", "Actividad de aprendizaje"}
-                and bool(re.match(
-                    r"^(?:Tarea(?:\s+de\s+evaluaci[oó]n)?|Aplicaci[oó]n\s+pr[aá]ctica|"
-                    r"Actividad\s+de\s+aprendizaje)\s+\d+",
-                    txt, re.I
-                ))
-            )
+            # Nueva etiqueta de tarea/actividad → nuevo bloque.
+            # Se detecta por el TEXTO (no por el estilo), porque las unidades
+            # suelen traer las tareas sin el estilo "Aplicación práctica". Así una
+            # segunda "Tarea de evaluación N" deja de fusionarse con la anterior.
+            es_nueva_tarea = bool(re.match(
+                r"^(?:Tarea\s+de\s+evaluaci[oó]n|Actividad\s+de\s+evaluaci[oó]n|"
+                r"Aplicaci[oó]n\s+pr[aá]ctica|Actividad\s+de\s+aprendizaje|"
+                r"Caso\s+pr[aá]ctico|Ejercicio|Tarea)\s+\d+",
+                txt, re.I
+            ))
             if style.startswith("Heading") or es_nueva_cabecera_especial or es_nueva_tarea:
                 flush()
             elif (blk.get("tipo") in {"nota", "para_saber_mas", "consejo",
@@ -4528,7 +4616,19 @@ def _claves_contexto_grafico(ctx_norm: str) -> list[str]:
 
 def _par_coincide_con_contexto(par_norm: str, ctx_norm: str) -> bool:
     claves = _claves_contexto_grafico(ctx_norm)
-    return any(k and (par_norm.startswith(k) or k in par_norm) for k in claves)
+    for k in claves:
+        if not k:
+            continue
+        # Ancla fiable: el párrafo EMPIEZA por el contexto original del gráfico.
+        if par_norm.startswith(k):
+            return True
+        # La coincidencia por subcadena (en cualquier punto del párrafo) solo se
+        # acepta con claves largas y específicas. Las claves cortas se repiten en
+        # otras frases del documento (p. ej. objetivos que reutilizan el texto del
+        # cuerpo) y provocaban que el esquema saltara a la primera página.
+        if len(k) >= 100 and k in par_norm:
+            return True
+    return False
 
 
 def insertar_graficos_por_contexto(pars: list[str], graficos: list[dict]) -> list[str]:
