@@ -1363,19 +1363,40 @@ def parsear_interacciones(path: Path | None) -> dict[int, dict]:
             pass
         return []
 
-    def _cell_lineas(cell) -> list[str]:
+    def _es_estilo_boton(para) -> bool:
+        """True si el párrafo usa el estilo "Botón" de la plantilla nueva
+        (título de desplegable)."""
+        try:
+            sid = (para.style.style_id or "").lower()
+            nombre = (para.style.name or "").lower()
+            return sid.startswith("botn") or nombre.startswith("bot")
+        except Exception:
+            return False
+
+    def _es_estilo_lista(para) -> bool:
+        """True si el párrafo usa el estilo "Párrafo de lista" (List Paragraph)."""
+        try:
+            sid = (para.style.style_id or "").lower()
+            nombre = (para.style.name or "").lower()
+            return sid == "prrafodelista" or nombre in {"list paragraph", "párrafo de lista", "parrafo de lista"}
+        except Exception:
+            return False
+
+    def _paras_lineas(paragraphs, lista_como_vineta: bool = False) -> list[str]:
         """
-        Extrae las líneas de una celda párrafo a párrafo.
+        Extrae las líneas de una secuencia de párrafos.
         Cuando un párrafo tiene numeración automática (w:numPr) asigna el
         prefijo de letra correspondiente (a., b., …) para no perder ese dato
-        al leer solo cell.text.
+        al leer solo el texto.
         Cuando un párrafo mezcla runs con fondo destacado (título de desplegable)
         y runs normales (cuerpo), los divide en dos líneas.
+        Con lista_como_vineta=True, un párrafo con estilo "Párrafo de lista" sin
+        numeración automática se marca como viñeta (plantilla nueva).
         """
         letras_seq = "abcdefghijklmnopqrstuvwxyz"
         letra_idx: dict[str, int] = {}  # numId_ilvl → contador
         lines: list[str] = []
-        for para in cell.paragraphs:
+        for para in paragraphs:
             txt = _norm_line(para.text)
             if not txt:
                 continue
@@ -1386,6 +1407,7 @@ def parsear_interacciones(path: Path | None) -> dict[int, dict]:
                 lines.extend(split)
                 continue
 
+            _txt_antes_num = txt
             # Detectar numeración automática
             try:
                 pPr = para._p.find(_qn("w:pPr"))
@@ -1410,15 +1432,22 @@ def parsear_interacciones(path: Path | None) -> dict[int, dict]:
                             letra_idx[key] = idx + 1
             except Exception:
                 pass
+            # Plantilla nueva: estilo "Párrafo de lista" sin numPr → viñeta
+            if (lista_como_vineta and txt == _txt_antes_num and _es_estilo_lista(para)
+                    and not re.match(r"^[·●○▪\-–]\s|^[a-h][.)]\s", txt, re.I)):
+                txt = "● " + txt
             lines.append(txt)
         return lines
 
-    def _cell_lineas_rich(cell) -> list[dict]:
-        """Like _cell_lineas but returns rich_obj per paragraph, preserving bold/italic runs."""
+    def _cell_lineas(cell) -> list[str]:
+        return _paras_lineas(cell.paragraphs)
+
+    def _paras_lineas_rich(paragraphs, lista_como_vineta: bool = False) -> list[dict]:
+        """Like _paras_lineas but returns rich_obj per paragraph, preserving bold/italic runs."""
         letras_seq = "abcdefghijklmnopqrstuvwxyz"
         letra_idx: dict[str, int] = {}
         rich_lines = []
-        for para in cell.paragraphs:
+        for para in paragraphs:
             txt = _norm_line(para.text)
             if not txt:
                 continue
@@ -1439,6 +1468,7 @@ def parsear_interacciones(path: Path | None) -> dict[int, dict]:
                 runs.append(r)
             if not runs:
                 runs = [{"text": txt}]
+            _txt_antes_num = txt
             try:
                 pPr = para._p.find(_qn("w:pPr"))
                 numPr = pPr.find(_qn("w:numPr")) if pPr is not None else None
@@ -1473,8 +1503,16 @@ def parsear_interacciones(path: Path | None) -> dict[int, dict]:
                             letra_idx[key] = idx + 1
             except Exception:
                 pass
+            # Plantilla nueva: estilo "Párrafo de lista" sin numPr → viñeta
+            if (lista_como_vineta and txt == _txt_antes_num and _es_estilo_lista(para)
+                    and not re.match(r"^[·●○▪\-–]\s|^[a-h][.)]\s", txt, re.I)):
+                txt = "● " + txt
+                runs = [{"text": "● "}] + runs
             rich_lines.append(rich_obj(txt, runs))
         return rich_lines
+
+    def _cell_lineas_rich(cell) -> list[dict]:
+        return _paras_lineas_rich(cell.paragraphs)
 
     def _opciones_rich_data(rich_lines: list[dict]) -> dict:
         """Zone rich_lines into opciones_rich, solucion_rich, feedback_rich."""
@@ -1605,6 +1643,90 @@ def parsear_interacciones(path: Path | None) -> dict[int, dict]:
                 "tipo": "texto",
                 "lineas": [_norm_line(x) for x in raw.splitlines() if _norm_line(x)]
             }
+
+    # ------------------------------------------------------------------
+    # Plantilla nueva (jul): las interacciones vienen como párrafos sueltos,
+    # SIN tabla contenedora. Los títulos de desplegable usan el estilo "Botón"
+    # (antes: fondo/highlight) y las listas el estilo "Párrafo de lista".
+    # Se mantiene la ruta de tablas anterior; esta solo añade las interacciones
+    # que no se hayan encontrado en tablas.
+    # ------------------------------------------------------------------
+
+    def _items_desplegables_estilo(paras) -> tuple[list[dict], list[dict]]:
+        """Construye items de desplegable usando el estilo "Botón" como título."""
+        grupos = []
+        actual = None
+        for para in paras:
+            txt = _norm_line(para.text)
+            if not txt:
+                continue
+            if re.match(r"^(Instrucci[oó]n\s*:|Desplegables\s*:?$|Lanzador\s*:)", txt, re.I):
+                continue
+            if _es_estilo_boton(para):
+                actual = {"titulo": txt, "titulo_para": para, "paras": []}
+                grupos.append(actual)
+            elif actual is not None:
+                actual["paras"].append(para)
+        items, items_rich = [], []
+        for g in grupos:
+            lineas = _paras_lineas(g["paras"], lista_como_vineta=True)
+            lineas_rich = _paras_lineas_rich(g["paras"], lista_como_vineta=True)
+            body, subitems = _separar_cuerpo_y_subitems(lineas)
+            body_rich, subitems_rich = _separar_cuerpo_y_subitems_rich(lineas_rich)
+            titulo_rich_l = _paras_lineas_rich([g["titulo_para"]])
+            titulo_rich = titulo_rich_l[0] if titulo_rich_l else rich_obj(g["titulo"], [{"text": g["titulo"]}])
+            items.append({"titulo": g["titulo"], "body": body, "subitems": subitems})
+            items_rich.append({
+                "titulo": g["titulo"],
+                "titulo_rich": titulo_rich,
+                "body_rich": body_rich,
+                "subitems_rich": subitems_rich,
+            })
+        return items, items_rich
+
+    def _parsear_interacciones_parrafos() -> dict[int, dict]:
+        res: dict[int, dict] = {}
+        bloques = []
+        actual = None
+        for para in doc.paragraphs:
+            txt = _norm_line(para.text)
+            if not txt:
+                continue
+            m = RE_INTER.match(txt)
+            if m:
+                actual = {"n": int(m.group(1)), "paras": []}
+                bloques.append(actual)
+                continue
+            if actual is not None:
+                actual["paras"].append(para)
+
+        for b in bloques:
+            n = b["n"]
+            paras = b["paras"]
+            lineas = _paras_lineas(paras, lista_como_vineta=True)
+            raw = "\n".join(lineas)
+            tiene_boton = any(_es_estilo_boton(p) for p in paras)
+            tiene_desplegables = tiene_boton or bool(re.search(r"(?im)^\s*Desplegables:?\s*$", raw))
+            _tiene_opciones = bool(
+                re.search(r"(?im)^\s*Opciones:?\s*$", raw)
+                or re.search(r"(?m)^[a-d][.)]\s+\S", raw)
+            )
+            if _tiene_opciones and re.search(r"(?im)^\s*Soluci[oó]n:", raw):
+                entry = _parsear_interaccion_opciones(raw)
+                entry.update(_opciones_rich_data(_paras_lineas_rich(paras, lista_como_vineta=True)))
+                res[n] = entry
+            elif tiene_desplegables:
+                items, items_rich = _items_desplegables_estilo(paras)
+                res[n] = {"tipo": "desplegables", "items": items, "items_rich": items_rich}
+            else:
+                res[n] = {
+                    "tipo": "texto",
+                    "lineas": [x for x in lineas if x],
+                }
+        return res
+
+    for n, data in _parsear_interacciones_parrafos().items():
+        result.setdefault(n, data)
 
     return result
 
