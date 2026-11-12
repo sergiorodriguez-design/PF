@@ -5,13 +5,44 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import traceback
 import zipfile
 from pathlib import Path
 
 from flask import Flask, request, jsonify
+from werkzeug.exceptions import RequestEntityTooLarge
 
 app = Flask(__name__)
+
+# Tamaño máximo de la petición (por defecto 50 MB, el límite de UrlFetchApp).
+MAX_MB = int(os.environ.get("MAX_PETICION_MB", "50"))
+app.config["MAX_CONTENT_LENGTH"] = MAX_MB * 1024 * 1024
+
+
+def _log(msg: str) -> None:
+    print(msg, file=sys.stderr, flush=True)
+
+
+@app.before_request
+def _registrar_y_limitar():
+    if request.method != "POST":
+        return None
+    largo = request.content_length
+    _log(f"→ {request.path}: Content-Length={largo if largo is not None else 'desconocido'}"
+         f" ({(largo or 0) / 1024 / 1024:.1f} MB)")
+    if largo is not None and largo > app.config["MAX_CONTENT_LENGTH"]:
+        return jsonify({"ok": False, "error": f"La petición ocupa {largo / 1024 / 1024:.1f} MB y el máximo es {MAX_MB} MB. "
+                                               "Envía menos unidades a la vez."}), 413
+    return None
+
+
+def _leer_json() -> dict:
+    """Lee el cuerpo JSON dejando constancia en el log de lo que tarda en llegar."""
+    t0 = time.monotonic()
+    data = request.get_json(force=True)
+    _log(f"  cuerpo recibido en {time.monotonic() - t0:.1f} s")
+    return data
 
 
 @app.after_request
@@ -47,7 +78,7 @@ def health():
 @app.route("/convertir", methods=["POST"])
 def convertir():
     try:
-        data = request.get_json(force=True)
+        data = _leer_json()
 
         nombre_salida = data.get("nombreSalida") or "unidad_papel.docx"
         archivos = data.get("archivos", {})
@@ -97,6 +128,8 @@ def convertir():
             "log": ["Conversión completada.", "STDOUT:", stdout, "STDERR:", stderr]
         })
 
+    except RequestEntityTooLarge:
+        return jsonify({"ok": False, "error": f"La petición supera el máximo de {MAX_MB} MB."}), 413
     except subprocess.TimeoutExpired:
         return jsonify({"ok": False, "error": "La conversión superó el tiempo máximo de 300 s."}), 504
     except Exception as e:
@@ -109,7 +142,7 @@ def convertir():
 def convertir_lote():
     log = []
     try:
-        data = request.get_json(force=True)
+        data = _leer_json()
 
         nombre_salida    = data.get("nombreSalida") or "curso_papel.docx"
         incluir_unidades = data.get("incluirUnidades", True)
@@ -206,6 +239,8 @@ def convertir_lote():
             "log": log
         })
 
+    except RequestEntityTooLarge:
+        return jsonify({"ok": False, "error": f"La petición supera el máximo de {MAX_MB} MB. Envía menos unidades a la vez.", "log": log}), 413
     except subprocess.TimeoutExpired:
         return jsonify({"ok": False, "error": "La conversión superó el tiempo máximo de 300 s.", "log": log}), 504
     except Exception as e:
